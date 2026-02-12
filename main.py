@@ -12,7 +12,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from starlette.requests import Request
+from starlette.responses import Response
 from typing import Optional
+import httpx
 
 from database import init_db, get_db, ContactSubmission, CareerSubmission, AdmissionSubmission, AdminUser
 
@@ -36,10 +39,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Kiva School Backend", lifespan=lifespan)
 
-# CORS middleware for frontend access
+CORS_ORIGINS = os.environ.get("KIVA_CORS_ORIGINS", "*").split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure for production
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -272,6 +276,24 @@ async def rebuild_site(username: str = Depends(require_auth)):
             }
 
         return {"success": True}
+
+
+TINA_GRAPHQL_URL = os.environ.get("TINA_GRAPHQL_URL", "http://localhost:4001/graphql")
+
+
+@app.api_route("/graphql", methods=["GET", "POST"])
+async def graphql_proxy(request: Request):
+    """Proxy GraphQL requests to the TinaCMS content API."""
+    async with httpx.AsyncClient() as client:
+        response = await client.request(
+            method=request.method,
+            url=TINA_GRAPHQL_URL,
+            headers={k: v for k, v in request.headers.items() if k.lower() != "host"},
+            content=await request.body(),
+        )
+        excluded = {"transfer-encoding", "content-encoding", "content-length"}
+        headers = {k: v for k, v in response.headers.items() if k.lower() not in excluded}
+        return Response(content=response.content, status_code=response.status_code, headers=headers)
 
 
 # Serve Astro static build (must be last - catches all routes)
