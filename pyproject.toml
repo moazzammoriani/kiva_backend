@@ -1,0 +1,22 @@
+[project]
+name = "kiva-backend"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi[standard]>=0.128.0",
+    "sqlalchemy>=2.0.0",
+    "python-multipart>=0.0.9",
+    "aiofiles>=24.1.0",
+    "uvicorn>=0.30.0",
+    "email-validator>=2.0.0",
+    "pyjwt>=2.11.0",
+    "bcrypt>=5.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "httpx>=0.27.0",
+]
