@@ -14,9 +14,13 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from starlette.requests import Request
 from starlette.responses import Response
+from fastapi.responses import FileResponse
 from typing import Optional
+from datetime import datetime
+import math
 import httpx
 
+from sqlalchemy import or_
 from database import init_db, get_db, ContactSubmission, CareerSubmission, AdmissionSubmission, AdminUser
 
 UPLOAD_DIR = "uploads"
@@ -65,6 +69,56 @@ def require_auth(authorization: Optional[str] = Header(None)) -> str:
         return payload["sub"]
     except (jwt.InvalidTokenError, KeyError):
         raise HTTPException(status_code=401, detail="Invalid token")
+
+
+def require_auth_or_query_token(
+    request: Request, authorization: Optional[str] = Header(None)
+) -> str:
+    """Like require_auth but also accepts ?token= query param (for file download links)."""
+    token = request.query_params.get("token")
+    if not token:
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="Missing or invalid token")
+        token = authorization.removeprefix("Bearer ")
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        return payload["sub"]
+    except (jwt.InvalidTokenError, KeyError):
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+
+def row_to_dict(row) -> dict:
+    """Convert SQLAlchemy model instance to dict with ISO datetime strings."""
+    d = {}
+    for c in row.__table__.columns:
+        v = getattr(row, c.name)
+        d[c.name] = v.isoformat() if isinstance(v, datetime) else v
+    return d
+
+
+def paginated_query(db: Session, model, page: int, per_page: int, sort: str, order: str, allowed_sorts: set, search_filter=None):
+    """Run a paginated, sorted query and return {items, total, page, per_page, pages}."""
+    per_page = min(max(per_page, 1), 100)
+    page = max(page, 1)
+
+    sort_col = sort if sort in allowed_sorts else "created_at"
+    col = getattr(model, sort_col)
+    order_clause = col.asc() if order == "asc" else col.desc()
+
+    query = db.query(model)
+    if search_filter is not None:
+        query = query.filter(search_filter)
+
+    total = query.count()
+    items = query.order_by(order_clause).offset((page - 1) * per_page).limit(per_page).all()
+
+    return {
+        "items": [row_to_dict(r) for r in items],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "pages": math.ceil(total / per_page) if total else 1,
+    }
 
 
 @app.post("/api/auth/login")
@@ -294,6 +348,143 @@ async def graphql_proxy(request: Request):
         excluded = {"transfer-encoding", "content-encoding", "content-length"}
         headers = {k: v for k, v in response.headers.items() if k.lower() not in excluded}
         return Response(content=response.content, status_code=response.status_code, headers=headers)
+
+
+# ── Submissions API (read-only, auth required) ──────────────────────────────
+
+@app.get("/api/submissions/contacts")
+async def list_contacts(
+    page: int = 1,
+    per_page: int = 25,
+    sort: str = "created_at",
+    order: str = "desc",
+    search: str = "",
+    username: str = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    search_filter = None
+    if search:
+        pattern = f"%{search}%"
+        search_filter = or_(
+            ContactSubmission.name.ilike(pattern),
+            ContactSubmission.email.ilike(pattern),
+            ContactSubmission.subject.ilike(pattern),
+        )
+    return paginated_query(
+        db, ContactSubmission, page, per_page, sort, order,
+        {"id", "name", "email", "subject", "created_at"},
+        search_filter,
+    )
+
+
+@app.get("/api/submissions/careers")
+async def list_careers(
+    page: int = 1,
+    per_page: int = 25,
+    sort: str = "created_at",
+    order: str = "desc",
+    search: str = "",
+    username: str = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    search_filter = None
+    if search:
+        pattern = f"%{search}%"
+        search_filter = or_(
+            CareerSubmission.name.ilike(pattern),
+            CareerSubmission.email.ilike(pattern),
+            CareerSubmission.position.ilike(pattern),
+        )
+    result = paginated_query(
+        db, CareerSubmission, page, per_page, sort, order,
+        {"id", "name", "email", "position", "created_at"},
+        search_filter,
+    )
+    # Replace cv_path with download URL
+    for item in result["items"]:
+        if item.get("cv_path"):
+            item["cv_url"] = f"/api/submissions/careers/{item['id']}/cv"
+            del item["cv_path"]
+        else:
+            item["cv_url"] = None
+            item.pop("cv_path", None)
+    return result
+
+
+@app.get("/api/submissions/admissions")
+async def list_admissions(
+    page: int = 1,
+    per_page: int = 25,
+    sort: str = "created_at",
+    order: str = "desc",
+    search: str = "",
+    username: str = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    search_filter = None
+    if search:
+        pattern = f"%{search}%"
+        search_filter = or_(
+            AdmissionSubmission.child_name.ilike(pattern),
+            AdmissionSubmission.mother_name.ilike(pattern),
+            AdmissionSubmission.father_name.ilike(pattern),
+        )
+    result = paginated_query(
+        db, AdmissionSubmission, page, per_page, sort, order,
+        {"id", "child_name", "session", "created_at"},
+        search_filter,
+    )
+    # Return summary fields only for the list view
+    summary_keys = {"id", "session", "child_name", "dob", "mother_name", "father_name", "mother_phone", "father_phone", "created_at"}
+    result["items"] = [{k: v for k, v in item.items() if k in summary_keys} for item in result["items"]]
+    return result
+
+
+@app.get("/api/submissions/admissions/{submission_id}")
+async def get_admission(
+    submission_id: int,
+    username: str = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    row = db.query(AdmissionSubmission).filter(AdmissionSubmission.id == submission_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    data = row_to_dict(row)
+    if data.get("progress_report_path"):
+        data["progress_report_url"] = f"/api/submissions/admissions/{submission_id}/progress-report"
+        del data["progress_report_path"]
+    else:
+        data["progress_report_url"] = None
+        data.pop("progress_report_path", None)
+    return data
+
+
+@app.get("/api/submissions/careers/{submission_id}/cv")
+async def download_career_cv(
+    submission_id: int,
+    username: str = Depends(require_auth_or_query_token),
+    db: Session = Depends(get_db),
+):
+    row = db.query(CareerSubmission).filter(CareerSubmission.id == submission_id).first()
+    if not row or not row.cv_path:
+        raise HTTPException(status_code=404, detail="CV not found")
+    if not os.path.exists(row.cv_path):
+        raise HTTPException(status_code=404, detail="File not found on disk")
+    return FileResponse(row.cv_path, filename=f"cv_{submission_id}{os.path.splitext(row.cv_path)[1]}")
+
+
+@app.get("/api/submissions/admissions/{submission_id}/progress-report")
+async def download_progress_report(
+    submission_id: int,
+    username: str = Depends(require_auth_or_query_token),
+    db: Session = Depends(get_db),
+):
+    row = db.query(AdmissionSubmission).filter(AdmissionSubmission.id == submission_id).first()
+    if not row or not row.progress_report_path:
+        raise HTTPException(status_code=404, detail="Progress report not found")
+    if not os.path.exists(row.progress_report_path):
+        raise HTTPException(status_code=404, detail="File not found on disk")
+    return FileResponse(row.progress_report_path, filename=f"report_{submission_id}{os.path.splitext(row.progress_report_path)[1]}")
 
 
 # Serve Astro static build (must be last - catches all routes)

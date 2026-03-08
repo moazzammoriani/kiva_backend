@@ -331,3 +331,117 @@ class TestAuthEndpoints:
         """Test rebuild without token returns 401."""
         response = client.post("/api/rebuild")
         assert response.status_code == 401
+
+
+class TestSubmissionsEndpoints:
+    """Test the GET /api/submissions/* endpoints."""
+
+    def test_list_contacts_requires_auth(self, client):
+        response = client.get("/api/submissions/contacts")
+        assert response.status_code == 401
+
+    def test_list_contacts_success(self, client, auth_token):
+        response = client.get(
+            "/api/submissions/contacts",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "items" in data
+        assert "total" in data
+        assert "page" in data
+        assert "per_page" in data
+        assert "pages" in data
+        assert data["page"] == 1
+        # Submissions from earlier tests should be present
+        assert data["total"] >= 2
+
+    def test_list_contacts_pagination(self, client, auth_token):
+        response = client.get(
+            "/api/submissions/contacts?per_page=1&page=2",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        data = response.json()
+        assert data["page"] == 2
+        assert data["per_page"] == 1
+        assert len(data["items"]) <= 1
+
+    def test_list_contacts_search(self, client, auth_token):
+        response = client.get(
+            "/api/submissions/contacts?search=John",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        data = response.json()
+        assert data["total"] >= 1
+        assert all("John" in item["name"] or "john" in item["email"] for item in data["items"])
+
+    def test_list_careers_success(self, client, auth_token):
+        response = client.get(
+            "/api/submissions/careers",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] >= 2
+        # cv_path should be replaced with cv_url
+        for item in data["items"]:
+            assert "cv_path" not in item
+            assert "cv_url" in item
+
+    def test_list_admissions_summary(self, client, auth_token):
+        response = client.get(
+            "/api/submissions/admissions",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] >= 2
+        # Should only have summary fields
+        item = data["items"][0]
+        assert "child_name" in item
+        assert "session" in item
+        assert "address" not in item
+        assert "mother_cnic" not in item
+
+    def test_admission_detail_success(self, client, auth_token):
+        # First get the list to find an ID
+        list_resp = client.get(
+            "/api/submissions/admissions",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        first_id = list_resp.json()["items"][0]["id"]
+
+        response = client.get(
+            f"/api/submissions/admissions/{first_id}",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        # Detail should include all fields
+        assert "child_name" in data
+        assert "address" in data
+        assert "mother_name" in data
+        assert "father_name" in data
+        assert "emergency_name" in data
+
+    def test_admission_detail_not_found(self, client, auth_token):
+        response = client.get(
+            "/api/submissions/admissions/99999",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert response.status_code == 404
+
+    def test_cv_download_not_found(self, client, auth_token):
+        response = client.get(
+            "/api/submissions/careers/99999/cv",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert response.status_code == 404
+
+    def test_query_token_auth(self, client, auth_token):
+        """Test that ?token= query param works for file download endpoints."""
+        response = client.get(
+            f"/api/submissions/careers/99999/cv?token={auth_token}",
+        )
+        # Should get 404 (not found), not 401 (unauthorized)
+        assert response.status_code == 404
