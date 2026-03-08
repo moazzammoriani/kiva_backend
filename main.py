@@ -1,13 +1,16 @@
 import asyncio
+import logging
 import os
 import secrets
+import smtplib
 import uuid
+from email.message import EmailMessage
 import aiofiles
 import bcrypt
 import jwt
 from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI, Depends, Header, HTTPException, UploadFile, File, Form
+from fastapi import BackgroundTasks, FastAPI, Depends, Header, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -31,6 +34,103 @@ JWT_SECRET = os.environ.get("KIVA_JWT_SECRET")
 if not JWT_SECRET:
     JWT_SECRET = secrets.token_urlsafe(32)
     print("WARNING: KIVA_JWT_SECRET not set — using a random secret (tokens won't survive restarts)")
+
+# Load .env file if present (so `fastapi dev` picks up config without manual sourcing)
+from dotenv import load_dotenv
+load_dotenv()
+
+# SMTP config (all optional — if KIVA_NOTIFY_EMAIL is unset, no emails are sent)
+SMTP_HOST = os.environ.get("KIVA_SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.environ.get("KIVA_SMTP_PORT", "587"))
+SMTP_USER = os.environ.get("KIVA_SMTP_USER", "")
+SMTP_PASS = os.environ.get("KIVA_SMTP_PASS", "")
+SMTP_FROM = os.environ.get("KIVA_SMTP_FROM", "") or SMTP_USER
+NOTIFY_EMAIL = os.environ.get("KIVA_NOTIFY_EMAIL", "")
+
+logger = logging.getLogger("kiva")
+
+
+def send_contact_email(name: str, email: str, subject: str | None, phone: str | None, message: str):
+    """Send an email notification for a new contact form submission. Runs in a background task."""
+    if not NOTIFY_EMAIL or not SMTP_USER or not SMTP_PASS:
+        return
+
+    msg = EmailMessage()
+    msg["From"] = SMTP_FROM
+    msg["To"] = NOTIFY_EMAIL
+    msg["Subject"] = f"[Contact Form] {subject or 'New submission'} — {name}"
+    msg.set_content(
+        f"Name: {name}\n"
+        f"Email: {email}\n"
+        f"Phone: {phone or '—'}\n"
+        f"Subject: {subject or '—'}\n\n"
+        f"{message}"
+    )
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.send_message(msg)
+    except Exception:
+        logger.exception("Failed to send contact form notification email")
+
+
+def send_admission_email(child_name: str, session: str, mother_name: str, father_name: str,
+                         mother_email: str | None, father_email: str | None,
+                         mother_phone: str | None, father_phone: str | None):
+    """Send an email notification for a new admission application. Runs in a background task."""
+    if not NOTIFY_EMAIL or not SMTP_USER or not SMTP_PASS:
+        return
+
+    msg = EmailMessage()
+    msg["From"] = SMTP_FROM
+    msg["To"] = NOTIFY_EMAIL
+    msg["Subject"] = f"[Admission Form] {child_name} — {session}"
+    msg.set_content(
+        f"Child: {child_name}\n"
+        f"Session: {session}\n\n"
+        f"Mother: {mother_name}\n"
+        f"  Email: {mother_email or '—'}\n"
+        f"  Phone: {mother_phone or '—'}\n\n"
+        f"Father: {father_name}\n"
+        f"  Email: {father_email or '—'}\n"
+        f"  Phone: {father_phone or '—'}"
+    )
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.send_message(msg)
+    except Exception:
+        logger.exception("Failed to send admission notification email")
+
+
+def send_career_email(name: str, email: str, phone: str | None, position: str | None, cover_letter: str | None):
+    """Send an email notification for a new career application. Runs in a background task."""
+    if not NOTIFY_EMAIL or not SMTP_USER or not SMTP_PASS:
+        return
+
+    msg = EmailMessage()
+    msg["From"] = SMTP_FROM
+    msg["To"] = NOTIFY_EMAIL
+    msg["Subject"] = f"[Career Application] {position or 'New application'} — {name}"
+    msg.set_content(
+        f"Name: {name}\n"
+        f"Email: {email}\n"
+        f"Phone: {phone or '—'}\n"
+        f"Position: {position or '—'}\n\n"
+        f"Cover Letter:\n{cover_letter or '—'}"
+    )
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.send_message(msg)
+    except Exception:
+        logger.exception("Failed to send career application notification email")
 
 
 @asynccontextmanager
@@ -152,6 +252,7 @@ async def save_upload_file(upload_file: UploadFile) -> str:
 
 @app.post("/api/contact")
 async def submit_contact(
+    background_tasks: BackgroundTasks,
     name: str = Form(...),
     email: str = Form(...),
     subject: Optional[str] = Form(None),
@@ -171,11 +272,14 @@ async def submit_contact(
     db.commit()
     db.refresh(submission)
 
+    background_tasks.add_task(send_contact_email, name, email, subject, phone, message)
+
     return {"success": True, "id": submission.id}
 
 
 @app.post("/api/careers")
 async def submit_career(
+    background_tasks: BackgroundTasks,
     name: str = Form(...),
     email: str = Form(...),
     phone: Optional[str] = Form(None),
@@ -201,11 +305,14 @@ async def submit_career(
     db.commit()
     db.refresh(submission)
 
+    background_tasks.add_task(send_career_email, name, email, phone, position, coverLetter)
+
     return {"success": True, "id": submission.id}
 
 
 @app.post("/api/admission")
 async def submit_admission(
+    background_tasks: BackgroundTasks,
     # Session
     session: str = Form(...),
     # Child's Information
@@ -301,6 +408,11 @@ async def submit_admission(
     db.add(submission)
     db.commit()
     db.refresh(submission)
+
+    background_tasks.add_task(
+        send_admission_email, childName, session, motherName, fatherName,
+        motherEmail, fatherEmail, motherPhone, fatherPhone,
+    )
 
     return {"success": True, "id": submission.id}
 
