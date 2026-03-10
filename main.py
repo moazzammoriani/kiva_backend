@@ -584,25 +584,15 @@ async def dashboard_spa(rest: str):
     return FileResponse(os.path.join(STATIC_DIR, "dashboard", "index.html"))
 
 
-# TinaCMS admin: serve rewritten index.html so assets load through the proxy
+# TinaCMS admin: proxy all /admin/* requests to the TinaCMS Vite dev server
 TINA_DEV_URL = os.environ.get("TINA_DEV_URL", "http://localhost:4001")
 
 
-@app.get("/admin")
-@app.get("/admin/")
-@app.get("/admin/{rest:path}")
-async def admin_spa(rest: str = ""):
-    admin_html = os.path.join(STATIC_DIR, "admin", "index.html")
-    with open(admin_html) as f:
-        html = f.read()
-    html = html.replace("http://localhost:4001/", "/tina-dev/")
-    return Response(content=html, media_type="text/html")
-
-
-@app.api_route("/tina-dev/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
-async def tina_dev_proxy(path: str, request: Request):
-    """Proxy TinaCMS dev server assets (Vite HMR, admin JS/CSS)."""
-    url = f"{TINA_DEV_URL}/{path}"
+@app.api_route("/admin/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+@app.api_route("/admin", methods=["GET"])
+async def admin_proxy(request: Request, path: str = ""):
+    """Proxy TinaCMS admin UI requests to the Vite dev server."""
+    url = f"{TINA_DEV_URL}/admin/{path}"
     if request.url.query:
         url += f"?{request.url.query}"
     async with httpx.AsyncClient() as client:
