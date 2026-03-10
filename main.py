@@ -46,26 +46,22 @@ SMTP_USER = os.environ.get("KIVA_SMTP_USER", "")
 SMTP_PASS = os.environ.get("KIVA_SMTP_PASS", "")
 SMTP_FROM = os.environ.get("KIVA_SMTP_FROM", "") or SMTP_USER
 NOTIFY_EMAIL = os.environ.get("KIVA_NOTIFY_EMAIL", "")
+SITE_URL = os.environ.get("KIVA_SITE_URL", "http://localhost:8000").rstrip("/")
 
 logger = logging.getLogger("kiva")
 
 
-def send_contact_email(name: str, email: str, subject: str | None, phone: str | None, message: str):
-    """Send an email notification for a new contact form submission. Runs in a background task."""
+def send_notification_email(subject: str, submission_type: str, submission_id: int, summary: str):
+    """Send an email notification with a link to the dashboard detail page. Runs in a background task."""
     if not NOTIFY_EMAIL or not SMTP_USER or not SMTP_PASS:
         return
 
+    link = f"{SITE_URL}/dashboard/{submission_type}/{submission_id}"
     msg = EmailMessage()
     msg["From"] = SMTP_FROM
     msg["To"] = NOTIFY_EMAIL
-    msg["Subject"] = f"[Contact Form] {subject or 'New submission'} — {name}"
-    msg.set_content(
-        f"Name: {name}\n"
-        f"Email: {email}\n"
-        f"Phone: {phone or '—'}\n"
-        f"Subject: {subject or '—'}\n\n"
-        f"{message}"
-    )
+    msg["Subject"] = subject
+    msg.set_content(f"{summary}\n\nView in dashboard:\n{link}")
 
     try:
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
@@ -73,64 +69,7 @@ def send_contact_email(name: str, email: str, subject: str | None, phone: str | 
             server.login(SMTP_USER, SMTP_PASS)
             server.send_message(msg)
     except Exception:
-        logger.exception("Failed to send contact form notification email")
-
-
-def send_admission_email(child_name: str, session: str, mother_name: str, father_name: str,
-                         mother_email: str | None, father_email: str | None,
-                         mother_phone: str | None, father_phone: str | None):
-    """Send an email notification for a new admission application. Runs in a background task."""
-    if not NOTIFY_EMAIL or not SMTP_USER or not SMTP_PASS:
-        return
-
-    msg = EmailMessage()
-    msg["From"] = SMTP_FROM
-    msg["To"] = NOTIFY_EMAIL
-    msg["Subject"] = f"[Admission Form] {child_name} — {session}"
-    msg.set_content(
-        f"Child: {child_name}\n"
-        f"Session: {session}\n\n"
-        f"Mother: {mother_name}\n"
-        f"  Email: {mother_email or '—'}\n"
-        f"  Phone: {mother_phone or '—'}\n\n"
-        f"Father: {father_name}\n"
-        f"  Email: {father_email or '—'}\n"
-        f"  Phone: {father_phone or '—'}"
-    )
-
-    try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASS)
-            server.send_message(msg)
-    except Exception:
-        logger.exception("Failed to send admission notification email")
-
-
-def send_career_email(name: str, email: str, phone: str | None, position: str | None, cover_letter: str | None):
-    """Send an email notification for a new career application. Runs in a background task."""
-    if not NOTIFY_EMAIL or not SMTP_USER or not SMTP_PASS:
-        return
-
-    msg = EmailMessage()
-    msg["From"] = SMTP_FROM
-    msg["To"] = NOTIFY_EMAIL
-    msg["Subject"] = f"[Career Application] {position or 'New application'} — {name}"
-    msg.set_content(
-        f"Name: {name}\n"
-        f"Email: {email}\n"
-        f"Phone: {phone or '—'}\n"
-        f"Position: {position or '—'}\n\n"
-        f"Cover Letter:\n{cover_letter or '—'}"
-    )
-
-    try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASS)
-            server.send_message(msg)
-    except Exception:
-        logger.exception("Failed to send career application notification email")
+        logger.exception("Failed to send notification email")
 
 
 @asynccontextmanager
@@ -272,7 +211,11 @@ async def submit_contact(
     db.commit()
     db.refresh(submission)
 
-    background_tasks.add_task(send_contact_email, name, email, subject, phone, message)
+    background_tasks.add_task(
+        send_notification_email,
+        f"[Contact Form] {subject or 'New submission'} — {name}",
+        "contacts", submission.id, f"New contact from {name} ({email})",
+    )
 
     return {"success": True, "id": submission.id}
 
@@ -305,7 +248,11 @@ async def submit_career(
     db.commit()
     db.refresh(submission)
 
-    background_tasks.add_task(send_career_email, name, email, phone, position, coverLetter)
+    background_tasks.add_task(
+        send_notification_email,
+        f"[Career Application] {position or 'New application'} — {name}",
+        "careers", submission.id, f"New career application from {name} ({email})",
+    )
 
     return {"success": True, "id": submission.id}
 
@@ -410,8 +357,9 @@ async def submit_admission(
     db.refresh(submission)
 
     background_tasks.add_task(
-        send_admission_email, childName, session, motherName, fatherName,
-        motherEmail, fatherEmail, motherPhone, fatherPhone,
+        send_notification_email,
+        f"[Admission Form] {childName} — {session}",
+        "admissions", submission.id, f"New admission application for {childName} ({session})",
     )
 
     return {"success": True, "id": submission.id}
@@ -571,6 +519,37 @@ async def get_admission(
     return data
 
 
+@app.get("/api/submissions/contacts/{submission_id}")
+async def get_contact(
+    submission_id: int,
+    username: str = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    row = db.query(ContactSubmission).filter(ContactSubmission.id == submission_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    return row_to_dict(row)
+
+
+@app.get("/api/submissions/careers/{submission_id}", response_model=None)
+async def get_career(
+    submission_id: int,
+    username: str = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    row = db.query(CareerSubmission).filter(CareerSubmission.id == submission_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    data = row_to_dict(row)
+    if data.get("cv_path"):
+        data["cv_url"] = f"/api/submissions/careers/{submission_id}/cv"
+        del data["cv_path"]
+    else:
+        data["cv_url"] = None
+        data.pop("cv_path", None)
+    return data
+
+
 @app.get("/api/submissions/careers/{submission_id}/cv")
 async def download_career_cv(
     submission_id: int,
@@ -597,6 +576,12 @@ async def download_progress_report(
     if not os.path.exists(row.progress_report_path):
         raise HTTPException(status_code=404, detail="File not found on disk")
     return FileResponse(row.progress_report_path, filename=f"report_{submission_id}{os.path.splitext(row.progress_report_path)[1]}")
+
+
+# SPA catch-all: serve dashboard/index.html for any /dashboard/* sub-path
+@app.get("/dashboard/{rest:path}")
+async def dashboard_spa(rest: str):
+    return FileResponse(os.path.join(STATIC_DIR, "dashboard", "index.html"))
 
 
 # Serve Astro static build (must be last - catches all routes)
