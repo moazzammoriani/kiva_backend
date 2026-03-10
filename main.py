@@ -584,5 +584,38 @@ async def dashboard_spa(rest: str):
     return FileResponse(os.path.join(STATIC_DIR, "dashboard", "index.html"))
 
 
+# TinaCMS admin: serve rewritten index.html so assets load through the proxy
+TINA_DEV_URL = os.environ.get("TINA_DEV_URL", "http://localhost:4001")
+
+
+@app.get("/admin")
+@app.get("/admin/")
+@app.get("/admin/{rest:path}")
+async def admin_spa(rest: str = ""):
+    admin_html = os.path.join(STATIC_DIR, "admin", "index.html")
+    with open(admin_html) as f:
+        html = f.read()
+    html = html.replace("http://localhost:4001/", "/tina-dev/")
+    return Response(content=html, media_type="text/html")
+
+
+@app.api_route("/tina-dev/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+async def tina_dev_proxy(path: str, request: Request):
+    """Proxy TinaCMS dev server assets (Vite HMR, admin JS/CSS)."""
+    url = f"{TINA_DEV_URL}/{path}"
+    if request.url.query:
+        url += f"?{request.url.query}"
+    async with httpx.AsyncClient() as client:
+        response = await client.request(
+            method=request.method,
+            url=url,
+            headers={k: v for k, v in request.headers.items() if k.lower() not in {"host", "connection"}},
+            content=await request.body(),
+        )
+        excluded = {"transfer-encoding", "content-encoding", "content-length"}
+        headers = {k: v for k, v in response.headers.items() if k.lower() not in excluded}
+        return Response(content=response.content, status_code=response.status_code, headers=headers)
+
+
 # Serve Astro static build (must be last - catches all routes)
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
