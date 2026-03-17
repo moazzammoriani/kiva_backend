@@ -370,6 +370,12 @@ async def rebuild_site(username: str = Depends(require_auth)):
         return {"success": False, "error": "A rebuild is already in progress"}
 
     async with _rebuild_lock:
+        # Clean dist/ and Astro caches so deleted pages don't linger
+        import shutil
+        for d in (KIVA_DIR / "dist", KIVA_DIR / ".astro", KIVA_DIR / "node_modules" / ".astro"):
+            if d.exists():
+                shutil.rmtree(d)
+
         proc = await asyncio.create_subprocess_exec(
             "npx", "astro", "build",
             cwd=KIVA_DIR,
