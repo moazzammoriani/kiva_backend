@@ -2,9 +2,9 @@ import asyncio
 import logging
 import os
 import secrets
-import smtplib
 import uuid
-from email.message import EmailMessage
+
+import resend
 import aiofiles
 import bcrypt
 import jwt
@@ -39,12 +39,9 @@ if not JWT_SECRET:
 from dotenv import load_dotenv
 load_dotenv()
 
-# SMTP config (all optional — if KIVA_NOTIFY_EMAIL is unset, no emails are sent)
-SMTP_HOST = os.environ.get("KIVA_SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.environ.get("KIVA_SMTP_PORT", "587"))
-SMTP_USER = os.environ.get("KIVA_SMTP_USER", "")
-SMTP_PASS = os.environ.get("KIVA_SMTP_PASS", "")
-SMTP_FROM = os.environ.get("KIVA_SMTP_FROM", "") or SMTP_USER
+# Resend config (all optional — if KIVA_NOTIFY_EMAIL is unset, no emails are sent)
+RESEND_API_KEY = os.environ.get("KIVA_RESEND_API_KEY", "")
+EMAIL_FROM = os.environ.get("KIVA_EMAIL_FROM", "Kiva School <noreply@notifications.kiva.school>")
 NOTIFY_EMAIL = os.environ.get("KIVA_NOTIFY_EMAIL", "")
 SITE_URL = os.environ.get("KIVA_SITE_URL", "http://localhost:8000").rstrip("/")
 
@@ -53,21 +50,19 @@ logger = logging.getLogger("kiva")
 
 def send_notification_email(subject: str, submission_type: str, submission_id: int, summary: str):
     """Send an email notification with a link to the dashboard detail page. Runs in a background task."""
-    if not NOTIFY_EMAIL or not SMTP_USER or not SMTP_PASS:
+    if not NOTIFY_EMAIL or not RESEND_API_KEY:
         return
 
+    resend.api_key = RESEND_API_KEY
     link = f"{SITE_URL}/dashboard/{submission_type}/{submission_id}"
-    msg = EmailMessage()
-    msg["From"] = SMTP_FROM
-    msg["To"] = NOTIFY_EMAIL
-    msg["Subject"] = subject
-    msg.set_content(f"{summary}\n\nView in dashboard:\n{link}")
 
     try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASS)
-            server.send_message(msg)
+        resend.Emails.send({
+            "from": EMAIL_FROM,
+            "to": [NOTIFY_EMAIL],
+            "subject": subject,
+            "text": f"{summary}\n\nView in dashboard:\n{link}",
+        })
     except Exception:
         logger.exception("Failed to send notification email")
 
@@ -392,6 +387,91 @@ async def rebuild_site(username: str = Depends(require_auth)):
         return {"success": True}
 
 
+# ── Media API (for TinaCMS media manager) ────────────────────────────────────
+
+MEDIA_DIR = KIVA_DIR / "public" / "images"
+
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp", ".avif", ".ico"}
+
+
+@app.get("/api/media")
+async def media_list(directory: str = "", limit: int = 36, offset: int = 0):
+    """List files and directories under public/images/."""
+    base = MEDIA_DIR / directory.strip("/")
+    if not base.exists() or not base.is_dir():
+        return {"items": [], "nextOffset": None}
+
+    entries = sorted(base.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
+    items = []
+    for entry in entries:
+        rel = entry.relative_to(MEDIA_DIR)
+        if entry.is_dir():
+            items.append({
+                "type": "dir",
+                "id": str(rel),
+                "filename": entry.name,
+                "directory": directory.strip("/"),
+            })
+        elif entry.suffix.lower() in IMAGE_EXTENSIONS:
+            items.append({
+                "type": "file",
+                "id": str(rel),
+                "filename": entry.name,
+                "directory": directory.strip("/"),
+                "src": f"/images/{rel}",
+            })
+
+    total = len(items)
+    page = items[offset : offset + limit]
+    next_offset = offset + limit if offset + limit < total else None
+    return {"items": page, "nextOffset": next_offset}
+
+
+@app.post("/api/media")
+async def media_upload(
+    file: UploadFile = File(...),
+    directory: str = Form(""),
+):
+    """Upload an image to public/images/."""
+    target_dir = MEDIA_DIR / directory.strip("/")
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = file.filename or "upload"
+    dest = target_dir / filename
+    # Avoid overwriting: append a number if needed
+    counter = 1
+    stem = dest.stem
+    suffix = dest.suffix
+    while dest.exists():
+        dest = target_dir / f"{stem}-{counter}{suffix}"
+        counter += 1
+
+    async with aiofiles.open(dest, "wb") as f:
+        content = await file.read()
+        await f.write(content)
+
+    rel = dest.relative_to(MEDIA_DIR)
+    return {
+        "type": "file",
+        "id": str(rel),
+        "filename": dest.name,
+        "directory": directory.strip("/"),
+        "src": f"/images/{rel}",
+    }
+
+
+@app.delete("/api/media")
+async def media_delete(directory: str = "", filename: str = ""):
+    """Delete an image from public/images/."""
+    if not filename:
+        raise HTTPException(status_code=400, detail="filename is required")
+    target = MEDIA_DIR / directory.strip("/") / filename
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    target.unlink()
+    return {"success": True}
+
+
 TINA_GRAPHQL_URL = os.environ.get("TINA_GRAPHQL_URL", "http://localhost:4001/graphql")
 
 
@@ -586,6 +666,24 @@ async def dashboard_spa(rest: str):
 
 # TinaCMS admin: proxy all /admin/* requests to the TinaCMS Vite dev server
 TINA_DEV_URL = os.environ.get("TINA_DEV_URL", "http://localhost:4001")
+
+
+@app.api_route("/api/tina/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+async def tina_media_proxy(request: Request, path: str = ""):
+    """Proxy TinaCMS media manager API requests to the dev server."""
+    url = f"{TINA_DEV_URL}/api/tina/{path}"
+    if request.url.query:
+        url += f"?{request.url.query}"
+    async with httpx.AsyncClient() as client:
+        response = await client.request(
+            method=request.method,
+            url=url,
+            headers={k: v for k, v in request.headers.items() if k.lower() not in {"host", "connection"}},
+            content=await request.body(),
+        )
+        excluded = {"transfer-encoding", "content-encoding", "content-length"}
+        headers = {k: v for k, v in response.headers.items() if k.lower() not in excluded}
+        return Response(content=response.content, status_code=response.status_code, headers=headers)
 
 
 @app.api_route("/admin/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
