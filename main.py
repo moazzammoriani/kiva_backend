@@ -456,6 +456,20 @@ async def media_upload(
         content = await file.read()
         await f.write(content)
 
+    # Generate optimized WebP version alongside the original
+    if suffix.lower() in {".png", ".jpg", ".jpeg"}:
+        from PIL import Image as PILImage
+
+        with PILImage.open(dest) as pil_img:
+            webp_dest = dest.with_suffix(".webp")
+            img = pil_img
+            if img.width > 1440:
+                img = img.resize(
+                    (1440, int(img.height * 1440 / img.width)),
+                    PILImage.LANCZOS,
+                )
+            img.save(webp_dest, "WEBP", quality=80)
+
     rel = dest.relative_to(MEDIA_DIR)
     return {
         "type": "file",
@@ -475,6 +489,10 @@ async def media_delete(directory: str = "", filename: str = ""):
     if not target.exists():
         raise HTTPException(status_code=404, detail="File not found")
     target.unlink()
+    # Also remove WebP sibling if it exists
+    webp_sibling = target.with_suffix(".webp")
+    if webp_sibling.exists():
+        webp_sibling.unlink()
     return {"success": True}
 
 
