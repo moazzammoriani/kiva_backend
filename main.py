@@ -130,7 +130,7 @@ def row_to_dict(row) -> dict:
     return d
 
 
-def paginated_query(db: Session, model, page: int, per_page: int, sort: str, order: str, allowed_sorts: set, search_filter=None):
+def paginated_query(db: Session, model, page: int, per_page: int, sort: str, order: str, allowed_sorts: set, search_filter=None, date_from: str = "", date_to: str = ""):
     """Run a paginated, sorted query and return {items, total, page, per_page, pages}."""
     per_page = min(max(per_page, 1), 100)
     page = max(page, 1)
@@ -142,6 +142,19 @@ def paginated_query(db: Session, model, page: int, per_page: int, sort: str, ord
     query = db.query(model)
     if search_filter is not None:
         query = query.filter(search_filter)
+    if date_from:
+        try:
+            query = query.filter(model.created_at >= datetime.fromisoformat(date_from))
+        except ValueError:
+            pass
+    if date_to:
+        try:
+            # Include the entire end date by adding one day
+            end = datetime.fromisoformat(date_to)
+            end = end.replace(hour=23, minute=59, second=59)
+            query = query.filter(model.created_at <= end)
+        except ValueError:
+            pass
 
     total = query.count()
     items = query.order_by(order_clause).offset((page - 1) * per_page).limit(per_page).all()
@@ -523,6 +536,8 @@ async def list_contacts(
     sort: str = "created_at",
     order: str = "desc",
     search: str = "",
+    date_from: str = "",
+    date_to: str = "",
     username: str = Depends(require_auth),
     db: Session = Depends(get_db),
 ):
@@ -537,7 +552,7 @@ async def list_contacts(
     return paginated_query(
         db, ContactSubmission, page, per_page, sort, order,
         {"id", "name", "email", "subject", "created_at"},
-        search_filter,
+        search_filter, date_from, date_to,
     )
 
 
@@ -548,6 +563,8 @@ async def list_careers(
     sort: str = "created_at",
     order: str = "desc",
     search: str = "",
+    date_from: str = "",
+    date_to: str = "",
     username: str = Depends(require_auth),
     db: Session = Depends(get_db),
 ):
@@ -562,7 +579,7 @@ async def list_careers(
     result = paginated_query(
         db, CareerSubmission, page, per_page, sort, order,
         {"id", "name", "email", "position", "created_at"},
-        search_filter,
+        search_filter, date_from, date_to,
     )
     # Replace cv_path with download URL
     for item in result["items"]:
@@ -582,6 +599,8 @@ async def list_admissions(
     sort: str = "created_at",
     order: str = "desc",
     search: str = "",
+    date_from: str = "",
+    date_to: str = "",
     username: str = Depends(require_auth),
     db: Session = Depends(get_db),
 ):
@@ -596,7 +615,7 @@ async def list_admissions(
     result = paginated_query(
         db, AdmissionSubmission, page, per_page, sort, order,
         {"id", "child_name", "session", "created_at"},
-        search_filter,
+        search_filter, date_from, date_to,
     )
     # Return summary fields only for the list view
     summary_keys = {"id", "session", "child_name", "dob", "mother_name", "father_name", "mother_phone", "father_phone", "created_at"}
