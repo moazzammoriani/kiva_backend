@@ -7,7 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from main import app
-from database import Base, get_db, AdminUser
+from database import Base, get_db, AdminUser, AdmissionSubmission, AdmissionProgress
 
 # Use a separate test database
 TEST_DATABASE_URL = "sqlite:///./test_kiva.db"
@@ -445,3 +445,153 @@ class TestSubmissionsEndpoints:
         )
         # Should get 404 (not found), not 401 (unauthorized)
         assert response.status_code == 404
+
+
+@pytest.fixture
+def admission_id(client):
+    """Create a test admission and return its ID."""
+    response = client.post(
+        "/api/admission",
+        data={
+            "session": "2025-2026",
+            "childName": "Progress Test Child",
+            "dob": "2019-01-01",
+            "address": "Test Address",
+            "appliedBefore": "no",
+            "specialNeeds": "no",
+            "motherName": "Test Mother",
+            "fatherName": "Test Father",
+            "emergencyName": "Test Emergency",
+            "emergencyPhone": "9999999999",
+            "declaration": "true",
+            "signature": "Test Sig",
+            "motherPhone": "1112223333",
+            "fatherPhone": "4445556666",
+        },
+    )
+    return response.json()["id"]
+
+
+class TestProgressEndpoints:
+    def test_list_shows_all_admissions(self, client, auth_token, admission_id):
+        """Test that the progress list includes all admissions, even without progress records."""
+        response = client.get(
+            "/api/submissions/progress",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "items" in data
+        assert data["total"] >= 1
+        # Find our admission in the list
+        item = next((i for i in data["items"] if i["admission_id"] == admission_id), None)
+        assert item is not None
+        assert item["child_name"] == "Progress Test Child"
+        assert item["progress_id"] is None  # no progress record yet
+
+    def test_list_progress_search(self, client, auth_token, admission_id):
+        """Test searching progress list by child name."""
+        response = client.get(
+            "/api/submissions/progress?search=Progress+Test",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert response.status_code == 200
+        assert response.json()["total"] >= 1
+
+    def test_get_progress_by_admission_id(self, client, auth_token, admission_id):
+        """Test getting progress detail by admission ID (no progress record yet)."""
+        response = client.get(
+            f"/api/submissions/progress/{admission_id}",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["child_name"] == "Progress Test Child"
+        assert data["progress_id"] is None
+        assert data["class_name"] is None
+
+    def test_get_progress_not_found(self, client, auth_token):
+        response = client.get(
+            "/api/submissions/progress/999999",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert response.status_code == 404
+
+    def test_upsert_creates_progress(self, client, auth_token, admission_id):
+        """Test PUT auto-creates a progress record if none exists."""
+        response = client.put(
+            f"/api/submissions/progress/{admission_id}",
+            json={"class_name": "Nursery", "form_status": "Complete"},
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["class_name"] == "Nursery"
+        assert data["form_status"] == "Complete"
+        assert data["progress_id"] is not None
+        assert data["child_name"] == "Progress Test Child"
+
+    def test_upsert_updates_existing(self, client, auth_token, admission_id):
+        """Test PUT updates an existing progress record."""
+        # Create first
+        client.put(
+            f"/api/submissions/progress/{admission_id}",
+            json={"class_name": "Nursery"},
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        # Update
+        response = client.put(
+            f"/api/submissions/progress/{admission_id}",
+            json={"class_name": "III", "acceptance": "Accepted", "remarks": "Great student"},
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["class_name"] == "III"
+        assert data["acceptance"] == "Accepted"
+        assert data["remarks"] == "Great student"
+
+    def test_upsert_not_found(self, client, auth_token):
+        response = client.put(
+            "/api/submissions/progress/999999",
+            json={"class_name": "IV"},
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert response.status_code == 404
+
+    def test_delete_progress(self, client, auth_token, admission_id):
+        """Test deleting a progress record by admission ID."""
+        # Create progress first
+        client.put(
+            f"/api/submissions/progress/{admission_id}",
+            json={"class_name": "II"},
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        # Delete
+        response = client.delete(
+            f"/api/submissions/progress/{admission_id}",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert response.status_code == 200
+        assert response.json()["success"] is True
+        # Verify progress fields are cleared
+        get_resp = client.get(
+            f"/api/submissions/progress/{admission_id}",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert get_resp.json()["progress_id"] is None
+
+    def test_delete_progress_not_found(self, client, auth_token):
+        """Test deleting when no progress record exists returns 404."""
+        response = client.delete(
+            "/api/submissions/progress/999999",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert response.status_code == 404
+
+    def test_progress_requires_auth(self, client):
+        """Test that all progress endpoints require authentication."""
+        assert client.get("/api/submissions/progress").status_code == 401
+        assert client.get("/api/submissions/progress/1").status_code == 401
+        assert client.put("/api/submissions/progress/1", json={}).status_code == 401
+        assert client.delete("/api/submissions/progress/1").status_code == 401

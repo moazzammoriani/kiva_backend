@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
-from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean, DateTime
-from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean, DateTime, ForeignKey
+from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 
 DATABASE_URL = "sqlite:///./kiva.db"
 
@@ -93,6 +93,43 @@ class AdmissionSubmission(Base):
     signature = Column(String, nullable=False)
 
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class AdmissionProgress(Base):
+    __tablename__ = "admission_progress"
+
+    id = Column(Integer, primary_key=True, index=True)
+    admission_id = Column(Integer, ForeignKey("admission_submissions.id"), unique=True, nullable=False, index=True)
+
+    # Editable overrides (fall back to admission values when NULL)
+    child_name = Column(String, nullable=True)
+    father_name = Column(String, nullable=True)
+    father_phone = Column(String, nullable=True)
+    mother_name = Column(String, nullable=True)
+    mother_phone = Column(String, nullable=True)
+
+    date_of_facilitation = Column(String, nullable=True)
+    class_name = Column(String, nullable=True)
+    form_status = Column(String, nullable=True)
+    affiliation = Column(String, nullable=True)
+    interview_applicable = Column(String, nullable=True)
+    parent_status = Column(String, nullable=True)
+    first_call_interview_assessment = Column(String, nullable=True)
+    second_call_interview_assessment = Column(String, nullable=True)
+    acceptance = Column(String, nullable=True)
+    send_confirmation_date = Column(String, nullable=True)
+    due_date_for_payment = Column(String, nullable=True)
+    follow_up = Column(Text, nullable=True)
+    follow_up_2 = Column(Text, nullable=True)
+    follow_up_3 = Column(Text, nullable=True)
+    status = Column(String, nullable=True)
+    remarks = Column(Text, nullable=True)
+    session = Column(String, nullable=True)
+
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    admission = relationship("AdmissionSubmission", backref="progress")
 
 
 class AdminUser(Base):

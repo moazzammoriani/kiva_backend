@@ -19,12 +19,12 @@ from starlette.requests import Request
 from starlette.responses import Response
 from fastapi.responses import FileResponse
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import math
 import httpx
 
 from sqlalchemy import or_
-from database import init_db, get_db, ContactSubmission, CareerSubmission, AdmissionSubmission, AdminUser
+from database import init_db, get_db, ContactSubmission, CareerSubmission, AdmissionSubmission, AdmissionProgress, AdminUser
 
 UPLOAD_DIR = "uploads"
 KIVA_DIR = Path(__file__).parent.parent / "kiva"
@@ -91,6 +91,31 @@ app.add_middleware(
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+class ProgressUpdate(BaseModel):
+    child_name: Optional[str] = None
+    father_name: Optional[str] = None
+    father_phone: Optional[str] = None
+    mother_name: Optional[str] = None
+    mother_phone: Optional[str] = None
+    date_of_facilitation: Optional[str] = None
+    class_name: Optional[str] = None
+    form_status: Optional[str] = None
+    affiliation: Optional[str] = None
+    interview_applicable: Optional[str] = None
+    parent_status: Optional[str] = None
+    first_call_interview_assessment: Optional[str] = None
+    second_call_interview_assessment: Optional[str] = None
+    acceptance: Optional[str] = None
+    send_confirmation_date: Optional[str] = None
+    due_date_for_payment: Optional[str] = None
+    follow_up: Optional[str] = None
+    follow_up_2: Optional[str] = None
+    follow_up_3: Optional[str] = None
+    status: Optional[str] = None
+    remarks: Optional[str] = None
+    session: Optional[str] = None
 
 
 def require_auth(authorization: Optional[str] = Header(None)) -> str:
@@ -701,6 +726,155 @@ async def download_progress_report(
     return FileResponse(row.progress_report_path, filename=f"report_{submission_id}{os.path.splitext(row.progress_report_path)[1]}")
 
 
+# ── Progress API (CRUD, auth required) ────────────────────────────────────────
+
+PROGRESS_FIELDS = [
+    "child_name", "father_name", "father_phone", "mother_name", "mother_phone",
+    "date_of_facilitation", "class_name", "form_status", "affiliation",
+    "interview_applicable", "parent_status", "first_call_interview_assessment",
+    "second_call_interview_assessment", "acceptance", "send_confirmation_date",
+    "due_date_for_payment", "follow_up", "follow_up_2", "follow_up_3",
+    "status", "remarks", "session",
+]
+
+# Fields that fall back to the admission record when NULL in progress
+_ADMISSION_FALLBACKS = {
+    "child_name": "child_name",
+    "father_name": "father_name",
+    "father_phone": "father_phone",
+    "mother_name": "mother_name",
+    "mother_phone": "mother_phone",
+    "session": "session",
+}
+
+
+def _admission_progress_row(adm, prog) -> dict:
+    """Build a combined dict from an AdmissionSubmission and optional AdmissionProgress."""
+    d = {"admission_id": adm.id}
+    if prog:
+        d["progress_id"] = prog.id
+        for f in PROGRESS_FIELDS:
+            val = getattr(prog, f)
+            if val is None and f in _ADMISSION_FALLBACKS:
+                val = getattr(adm, _ADMISSION_FALLBACKS[f])
+            d[f] = val
+        d["updated_at"] = prog.updated_at.isoformat() if prog.updated_at else None
+    else:
+        d["progress_id"] = None
+        for f in PROGRESS_FIELDS:
+            if f in _ADMISSION_FALLBACKS:
+                d[f] = getattr(adm, _ADMISSION_FALLBACKS[f])
+            else:
+                d[f] = None
+        d["updated_at"] = None
+    return d
+
+
+@app.get("/api/submissions/progress")
+async def list_progress(
+    page: int = 1,
+    per_page: int = 25,
+    sort: str = "created_at",
+    order: str = "desc",
+    search: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    username: str = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    per_page = min(max(per_page, 1), 100)
+    page = max(page, 1)
+
+    query = db.query(AdmissionSubmission, AdmissionProgress).outerjoin(
+        AdmissionProgress, AdmissionSubmission.id == AdmissionProgress.admission_id
+    )
+
+    if search:
+        pattern = f"%{search}%"
+        query = query.filter(or_(
+            AdmissionSubmission.child_name.ilike(pattern),
+            AdmissionSubmission.father_name.ilike(pattern),
+            AdmissionSubmission.mother_name.ilike(pattern),
+        ))
+    if date_from:
+        try:
+            query = query.filter(AdmissionSubmission.created_at >= datetime.fromisoformat(date_from))
+        except ValueError:
+            pass
+    if date_to:
+        try:
+            end = datetime.fromisoformat(date_to)
+            end = end.replace(hour=23, minute=59, second=59)
+            query = query.filter(AdmissionSubmission.created_at <= end)
+        except ValueError:
+            pass
+
+    allowed_sorts = {"created_at", "child_name", "session"}
+    sort_col = sort if sort in allowed_sorts else "created_at"
+    col = getattr(AdmissionSubmission, sort_col)
+    order_clause = col.asc() if order == "asc" else col.desc()
+
+    total = query.count()
+    rows = query.order_by(order_clause).offset((page - 1) * per_page).limit(per_page).all()
+
+    return {
+        "items": [_admission_progress_row(adm, prog) for adm, prog in rows],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "pages": math.ceil(total / per_page) if total else 1,
+    }
+
+
+@app.get("/api/submissions/progress/{admission_id}")
+async def get_progress(
+    admission_id: int,
+    username: str = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    adm = db.query(AdmissionSubmission).filter(AdmissionSubmission.id == admission_id).first()
+    if not adm:
+        raise HTTPException(status_code=404, detail="Admission not found")
+    prog = db.query(AdmissionProgress).filter(AdmissionProgress.admission_id == admission_id).first()
+    return _admission_progress_row(adm, prog)
+
+
+@app.put("/api/submissions/progress/{admission_id}")
+async def upsert_progress(
+    admission_id: int,
+    body: ProgressUpdate,
+    username: str = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    adm = db.query(AdmissionSubmission).filter(AdmissionSubmission.id == admission_id).first()
+    if not adm:
+        raise HTTPException(status_code=404, detail="Admission not found")
+    row = db.query(AdmissionProgress).filter(AdmissionProgress.admission_id == admission_id).first()
+    if not row:
+        row = AdmissionProgress(admission_id=admission_id)
+        db.add(row)
+    for key, value in body.model_dump(exclude_unset=True).items():
+        setattr(row, key, value)
+    row.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(row)
+    return _admission_progress_row(adm, row)
+
+
+@app.delete("/api/submissions/progress/{admission_id}")
+async def delete_progress(
+    admission_id: int,
+    username: str = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    row = db.query(AdmissionProgress).filter(AdmissionProgress.admission_id == admission_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Progress record not found")
+    db.delete(row)
+    db.commit()
+    return {"success": True}
+
+
 # SPA catch-all: serve dashboard/index.html for any /dashboard/* sub-path
 @app.get("/dashboard/{rest:path}")
 async def dashboard_spa(rest: str):
@@ -732,20 +906,35 @@ async def tina_media_proxy(request: Request, path: str = ""):
 @app.api_route("/admin/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
 @app.api_route("/admin", methods=["GET"])
 async def admin_proxy(request: Request, path: str = ""):
-    """Proxy TinaCMS admin UI requests to the Vite dev server."""
+    """Proxy TinaCMS admin UI requests to the Vite dev server.
+
+    Retries on connection errors to handle the startup race where FastAPI
+    is ready before TinaCMS has finished launching its Vite dev server.
+    """
     url = f"{TINA_DEV_URL}/admin/{path}"
     if request.url.query:
         url += f"?{request.url.query}"
-    async with httpx.AsyncClient() as client:
-        response = await client.request(
-            method=request.method,
-            url=url,
-            headers={k: v for k, v in request.headers.items() if k.lower() not in {"host", "connection"}},
-            content=await request.body(),
-        )
-        excluded = {"transfer-encoding", "content-encoding", "content-length"}
-        headers = {k: v for k, v in response.headers.items() if k.lower() not in excluded}
-        return Response(content=response.content, status_code=response.status_code, headers=headers)
+    body = await request.body()
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in {"host", "connection"}}
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.request(
+                    method=request.method, url=url, headers=headers, content=body,
+                )
+                excluded = {"transfer-encoding", "content-encoding", "content-length"}
+                resp_headers = {k: v for k, v in response.headers.items() if k.lower() not in excluded}
+                return Response(content=response.content, status_code=response.status_code, headers=resp_headers)
+        except httpx.ConnectError:
+            if attempt < max_retries - 1:
+                await asyncio.sleep(1)
+            else:
+                return Response(
+                    content="TinaCMS is still starting up — please refresh in a few seconds.",
+                    status_code=503,
+                    media_type="text/plain",
+                )
 
 
 # Serve Astro static build (must be last - catches all routes)
