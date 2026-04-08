@@ -428,29 +428,15 @@ async def rebuild_site(username: str = Depends(require_auth)):
                 "error": stderr.decode().strip()[-500:],
             }
 
-        # Rebuild TinaCMS admin UI (astro build copies the dev version from
-        # public/admin/ which has localhost:4001 references — overwrite it
-        # with the production build that has hashed assets).
-        proc = await asyncio.create_subprocess_exec(
-            "npx", "tinacms", "build", "--local", "--skip-cloud-checks",
-            cwd=KIVA_DIR,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
-
-        if proc.returncode != 0:
-            return {
-                "success": False,
-                "error": f"Admin UI build failed: {stderr.decode().strip()[-500:]}",
-            }
-
-        # Copy production admin build into dist/
-        admin_src = KIVA_DIR / "public" / "admin"
+        # Restore production admin UI (astro build copies dev HTML from
+        # public/admin/ which has localhost:4001 refs — overwrite with the
+        # production build saved by start-production.sh).
+        admin_src = KIVA_DIR / ".admin-production"
         admin_dest = KIVA_DIR / "dist" / "admin"
-        if admin_dest.exists():
-            shutil.rmtree(admin_dest)
-        shutil.copytree(admin_src, admin_dest)
+        if admin_src.exists():
+            if admin_dest.exists():
+                shutil.rmtree(admin_dest)
+            shutil.copytree(admin_src, admin_dest)
 
         return {"success": True}
 
