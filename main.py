@@ -414,6 +414,17 @@ async def rebuild_site(username: str = Depends(require_auth)):
             if d.exists():
                 shutil.rmtree(d)
 
+        # Rebuild TinaCMS admin UI (static bundle)
+        tina_proc = await asyncio.create_subprocess_exec(
+            "npx", "tinacms", "build", "--local", "--skip-cloud-checks",
+            cwd=KIVA_DIR,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, tina_err = await tina_proc.communicate()
+        if tina_proc.returncode != 0:
+            return {"success": False, "error": tina_err.decode().strip()[-500:]}
+
         proc = await asyncio.create_subprocess_exec(
             "npx", "astro", "build",
             cwd=KIVA_DIR,
@@ -903,39 +914,6 @@ async def tina_media_proxy(request: Request, path: str = ""):
         return Response(content=response.content, status_code=response.status_code, headers=headers)
 
 
-@app.api_route("/admin/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
-@app.api_route("/admin", methods=["GET"])
-async def admin_proxy(request: Request, path: str = ""):
-    """Proxy TinaCMS admin UI requests to the Vite dev server.
-
-    Retries on connection errors to handle the startup race where FastAPI
-    is ready before TinaCMS has finished launching its Vite dev server.
-    """
-    url = f"{TINA_DEV_URL}/admin/{path}"
-    if request.url.query:
-        url += f"?{request.url.query}"
-    body = await request.body()
-    headers = {k: v for k, v in request.headers.items() if k.lower() not in {"host", "connection"}}
-    max_retries = 5
-    for attempt in range(max_retries):
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.request(
-                    method=request.method, url=url, headers=headers, content=body,
-                )
-                excluded = {"transfer-encoding", "content-encoding", "content-length"}
-                resp_headers = {k: v for k, v in response.headers.items() if k.lower() not in excluded}
-                return Response(content=response.content, status_code=response.status_code, headers=resp_headers)
-        except httpx.ConnectError:
-            if attempt < max_retries - 1:
-                await asyncio.sleep(1)
-            else:
-                return Response(
-                    content="TinaCMS is still starting up — please refresh in a few seconds.",
-                    status_code=503,
-                    media_type="text/plain",
-                )
-
-
-# Serve Astro static build (must be last - catches all routes)
+# Serve Astro static build (admin UI is pre-built into dist/admin/ — no proxy needed)
+# Must be last since it catches all routes
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
