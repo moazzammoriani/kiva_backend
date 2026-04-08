@@ -842,6 +842,51 @@ async def list_progress(
     }
 
 
+@app.get("/api/submissions/progress/export")
+async def export_progress_csv(
+    date_from: str = "",
+    date_to: str = "",
+    username: str = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    import csv
+    import io
+
+    query = db.query(AdmissionSubmission, AdmissionProgress).outerjoin(
+        AdmissionProgress, AdmissionSubmission.id == AdmissionProgress.admission_id
+    )
+
+    if date_from:
+        try:
+            query = query.filter(AdmissionSubmission.created_at >= datetime.fromisoformat(date_from))
+        except ValueError:
+            pass
+    if date_to:
+        try:
+            end = datetime.fromisoformat(date_to)
+            end = end.replace(hour=23, minute=59, second=59)
+            query = query.filter(AdmissionSubmission.created_at <= end)
+        except ValueError:
+            pass
+
+    rows = query.order_by(AdmissionSubmission.created_at.desc()).all()
+
+    headers = ["Submitted"] + [col for col in PROGRESS_FIELDS]
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(headers)
+    for adm, prog in rows:
+        row_data = _admission_progress_row(adm, prog)
+        submitted = adm.created_at.strftime("%Y-%m-%d") if adm.created_at else ""
+        writer.writerow([submitted] + [row_data.get(f, "") or "" for f in PROGRESS_FIELDS])
+
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=progress-export.csv"},
+    )
+
+
 @app.get("/api/submissions/progress/{admission_id}")
 async def get_progress(
     admission_id: int,
