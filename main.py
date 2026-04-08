@@ -782,6 +782,7 @@ def _admission_progress_row(adm, prog) -> dict:
             else:
                 d[f] = None
         d["updated_at"] = None
+    d["submitted_at"] = adm.created_at.isoformat() if adm.created_at else None
     return d
 
 
