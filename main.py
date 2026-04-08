@@ -414,16 +414,13 @@ async def rebuild_site(username: str = Depends(require_auth)):
             if d.exists():
                 shutil.rmtree(d)
 
-        # Rebuild TinaCMS admin UI (static bundle)
-        tina_proc = await asyncio.create_subprocess_exec(
-            "npx", "tinacms", "build", "--local", "--skip-cloud-checks",
-            cwd=KIVA_DIR,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, tina_err = await tina_proc.communicate()
-        if tina_proc.returncode != 0:
-            return {"success": False, "error": tina_err.decode().strip()[-500:]}
+        # Preserve pre-built TinaCMS admin UI across rebuilds
+        admin_dir = KIVA_DIR / "dist" / "admin"
+        admin_backup = KIVA_DIR / ".admin-build-backup"
+        if admin_dir.exists():
+            if admin_backup.exists():
+                shutil.rmtree(admin_backup)
+            shutil.copytree(admin_dir, admin_backup)
 
         proc = await asyncio.create_subprocess_exec(
             "npx", "astro", "build",
@@ -438,6 +435,13 @@ async def rebuild_site(username: str = Depends(require_auth)):
                 "success": False,
                 "error": stderr.decode().strip()[-500:],
             }
+
+        # Restore pre-built admin UI (astro build copies the dev version from public/)
+        if admin_backup.exists():
+            admin_dest = KIVA_DIR / "dist" / "admin"
+            if admin_dest.exists():
+                shutil.rmtree(admin_dest)
+            shutil.copytree(admin_backup, admin_dest)
 
         return {"success": True}
 
