@@ -414,14 +414,6 @@ async def rebuild_site(username: str = Depends(require_auth)):
             if d.exists():
                 shutil.rmtree(d)
 
-        # Preserve pre-built TinaCMS admin UI across rebuilds
-        admin_dir = KIVA_DIR / "dist" / "admin"
-        admin_backup = KIVA_DIR / ".admin-build-backup"
-        if admin_dir.exists():
-            if admin_backup.exists():
-                shutil.rmtree(admin_backup)
-            shutil.copytree(admin_dir, admin_backup)
-
         proc = await asyncio.create_subprocess_exec(
             "npx", "astro", "build",
             cwd=KIVA_DIR,
@@ -436,12 +428,29 @@ async def rebuild_site(username: str = Depends(require_auth)):
                 "error": stderr.decode().strip()[-500:],
             }
 
-        # Restore pre-built admin UI (astro build copies the dev version from public/)
-        if admin_backup.exists():
-            admin_dest = KIVA_DIR / "dist" / "admin"
-            if admin_dest.exists():
-                shutil.rmtree(admin_dest)
-            shutil.copytree(admin_backup, admin_dest)
+        # Rebuild TinaCMS admin UI (astro build copies the dev version from
+        # public/admin/ which has localhost:4001 references — overwrite it
+        # with the production build that has hashed assets).
+        proc = await asyncio.create_subprocess_exec(
+            "npx", "tinacms", "build", "--local", "--skip-cloud-checks",
+            cwd=KIVA_DIR,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+
+        if proc.returncode != 0:
+            return {
+                "success": False,
+                "error": f"Admin UI build failed: {stderr.decode().strip()[-500:]}",
+            }
+
+        # Copy production admin build into dist/
+        admin_src = KIVA_DIR / "public" / "admin"
+        admin_dest = KIVA_DIR / "dist" / "admin"
+        if admin_dest.exists():
+            shutil.rmtree(admin_dest)
+        shutil.copytree(admin_src, admin_dest)
 
         return {"success": True}
 
@@ -555,16 +564,24 @@ TINA_GRAPHQL_URL = os.environ.get("TINA_GRAPHQL_URL", "http://localhost:4001/gra
 @app.api_route("/graphql", methods=["GET", "POST"])
 async def graphql_proxy(request: Request):
     """Proxy GraphQL requests to the TinaCMS content API."""
-    async with httpx.AsyncClient() as client:
-        response = await client.request(
-            method=request.method,
-            url=TINA_GRAPHQL_URL,
-            headers={k: v for k, v in request.headers.items() if k.lower() != "host"},
-            content=await request.body(),
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.request(
+                method=request.method,
+                url=TINA_GRAPHQL_URL,
+                headers={k: v for k, v in request.headers.items()
+                         if k.lower() not in {"host", "connection"}},
+                content=await request.body(),
+            )
+            excluded = {"transfer-encoding", "content-encoding", "content-length"}
+            headers = {k: v for k, v in response.headers.items() if k.lower() not in excluded}
+            return Response(content=response.content, status_code=response.status_code, headers=headers)
+    except (httpx.ConnectError, httpx.TimeoutException):
+        return Response(
+            content='{"errors":[{"message":"CMS content API is not running"}]}',
+            status_code=503,
+            media_type="application/json",
         )
-        excluded = {"transfer-encoding", "content-encoding", "content-length"}
-        headers = {k: v for k, v in response.headers.items() if k.lower() not in excluded}
-        return Response(content=response.content, status_code=response.status_code, headers=headers)
 
 
 # ── Submissions API (read-only, auth required) ──────────────────────────────
@@ -942,28 +959,6 @@ async def dashboard_spa(rest: str):
     return FileResponse(os.path.join(STATIC_DIR, "dashboard", "index.html"))
 
 
-# TinaCMS admin: proxy all /admin/* requests to the TinaCMS Vite dev server
-TINA_DEV_URL = os.environ.get("TINA_DEV_URL", "http://localhost:4001")
-
-
-@app.api_route("/api/tina/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
-async def tina_media_proxy(request: Request, path: str = ""):
-    """Proxy TinaCMS media manager API requests to the dev server."""
-    url = f"{TINA_DEV_URL}/api/tina/{path}"
-    if request.url.query:
-        url += f"?{request.url.query}"
-    async with httpx.AsyncClient() as client:
-        response = await client.request(
-            method=request.method,
-            url=url,
-            headers={k: v for k, v in request.headers.items() if k.lower() not in {"host", "connection"}},
-            content=await request.body(),
-        )
-        excluded = {"transfer-encoding", "content-encoding", "content-length"}
-        headers = {k: v for k, v in response.headers.items() if k.lower() not in excluded}
-        return Response(content=response.content, status_code=response.status_code, headers=headers)
-
-
-# Serve Astro static build (admin UI is pre-built into dist/admin/ — no proxy needed)
+# Serve Astro static build (admin UI is pre-built into dist/admin/)
 # Must be last since it catches all routes
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
