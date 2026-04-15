@@ -403,6 +403,145 @@ class TestSubmissionsEndpoints:
         assert "address" not in item
         assert "mother_cnic" not in item
 
+    def test_update_contact_success(self, client, auth_token):
+        create = client.post(
+            "/api/contact",
+            data={"name": "Edit Me", "email": "edit@example.com", "message": "original"},
+        )
+        cid = create.json()["id"]
+        response = client.put(
+            f"/api/submissions/contacts/{cid}",
+            json={"message": "updated", "subject": "Changed"},
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["message"] == "updated"
+        assert data["subject"] == "Changed"
+        assert data["email"] == "edit@example.com"
+        get_resp = client.get(
+            f"/api/submissions/contacts/{cid}",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert get_resp.json()["message"] == "updated"
+
+    def test_update_contact_not_found(self, client, auth_token):
+        response = client.put(
+            "/api/submissions/contacts/999999",
+            json={"name": "X"},
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert response.status_code == 404
+
+    def test_update_contact_requires_auth(self, client):
+        assert client.put("/api/submissions/contacts/1", json={}).status_code == 401
+
+    def test_delete_contact_success(self, client, auth_token):
+        create = client.post(
+            "/api/contact",
+            data={"name": "Delete Me", "email": "del@example.com", "message": "bye"},
+        )
+        cid = create.json()["id"]
+        response = client.delete(
+            f"/api/submissions/contacts/{cid}",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert response.status_code == 200
+        assert response.json()["success"] is True
+        assert client.get(
+            f"/api/submissions/contacts/{cid}",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        ).status_code == 404
+
+    def test_delete_contact_not_found(self, client, auth_token):
+        response = client.delete(
+            "/api/submissions/contacts/999999",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert response.status_code == 404
+
+    def test_delete_contact_requires_auth(self, client):
+        assert client.delete("/api/submissions/contacts/1").status_code == 401
+
+    def test_update_career_success(self, client, auth_token):
+        create = client.post(
+            "/api/careers",
+            data={"name": "Career Edit", "email": "c@example.com", "position": "Teacher"},
+        )
+        cid = create.json()["id"]
+        response = client.put(
+            f"/api/submissions/careers/{cid}",
+            json={"position": "Principal", "cover_letter": "Updated letter"},
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["position"] == "Principal"
+        assert data["cover_letter"] == "Updated letter"
+        assert "cv_url" in data
+        assert "cv_path" not in data
+
+    def test_update_career_not_found(self, client, auth_token):
+        response = client.put(
+            "/api/submissions/careers/999999",
+            json={"name": "X"},
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert response.status_code == 404
+
+    def test_update_career_requires_auth(self, client):
+        assert client.put("/api/submissions/careers/1", json={}).status_code == 401
+
+    def test_delete_career_removes_cv_file(self, client, auth_token):
+        cv_content = b"CV to be deleted"
+        create = client.post(
+            "/api/careers",
+            data={"name": "Del Career", "email": "dc@example.com"},
+            files={"cv": ("cv.pdf", io.BytesIO(cv_content), "application/pdf")},
+        )
+        cid = create.json()["id"]
+        # Find the cv_path via the DB session
+        db = TestSessionLocal()
+        from database import CareerSubmission as _CS
+        row = db.query(_CS).filter(_CS.id == cid).first()
+        cv_path = row.cv_path
+        db.close()
+        assert cv_path and os.path.exists(cv_path)
+
+        response = client.delete(
+            f"/api/submissions/careers/{cid}",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert response.status_code == 200
+        assert not os.path.exists(cv_path)
+        assert client.get(
+            f"/api/submissions/careers/{cid}",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        ).status_code == 404
+
+    def test_delete_career_without_cv(self, client, auth_token):
+        create = client.post(
+            "/api/careers",
+            data={"name": "No CV", "email": "nocv@example.com"},
+        )
+        cid = create.json()["id"]
+        response = client.delete(
+            f"/api/submissions/careers/{cid}",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert response.status_code == 200
+        assert response.json()["success"] is True
+
+    def test_delete_career_not_found(self, client, auth_token):
+        response = client.delete(
+            "/api/submissions/careers/999999",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert response.status_code == 404
+
+    def test_delete_career_requires_auth(self, client):
+        assert client.delete("/api/submissions/careers/1").status_code == 401
+
     def test_admission_detail_success(self, client, auth_token):
         # First get the list to find an ID
         list_resp = client.get(
@@ -430,6 +569,33 @@ class TestSubmissionsEndpoints:
             headers={"Authorization": f"Bearer {auth_token}"},
         )
         assert response.status_code == 404
+
+    def test_update_admission_success(self, client, auth_token, admission_id):
+        response = client.put(
+            f"/api/submissions/admissions/{admission_id}",
+            json={"child_name": "Renamed Child", "mother_email": "new@example.com"},
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["child_name"] == "Renamed Child"
+        assert data["mother_email"] == "new@example.com"
+        get_resp = client.get(
+            f"/api/submissions/admissions/{admission_id}",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert get_resp.json()["child_name"] == "Renamed Child"
+
+    def test_update_admission_not_found(self, client, auth_token):
+        response = client.put(
+            "/api/submissions/admissions/999999",
+            json={"child_name": "X"},
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert response.status_code == 404
+
+    def test_update_admission_requires_auth(self, client):
+        assert client.put("/api/submissions/admissions/1", json={}).status_code == 401
 
     def test_cv_download_not_found(self, client, auth_token):
         response = client.get(
@@ -559,39 +725,56 @@ class TestProgressEndpoints:
         )
         assert response.status_code == 404
 
-    def test_delete_progress(self, client, auth_token, admission_id):
-        """Test deleting a progress record by admission ID."""
-        # Create progress first
+    def test_delete_admission_removes_admission_and_progress(self, client, auth_token, admission_id):
+        """Deleting an admission also removes its progress record."""
         client.put(
             f"/api/submissions/progress/{admission_id}",
             json={"class_name": "II"},
             headers={"Authorization": f"Bearer {auth_token}"},
         )
-        # Delete
         response = client.delete(
-            f"/api/submissions/progress/{admission_id}",
+            f"/api/submissions/admissions/{admission_id}",
             headers={"Authorization": f"Bearer {auth_token}"},
         )
         assert response.status_code == 200
         assert response.json()["success"] is True
-        # Verify progress fields are cleared
-        get_resp = client.get(
-            f"/api/submissions/progress/{admission_id}",
+        assert client.get(
+            f"/api/submissions/admissions/{admission_id}",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        ).status_code == 404
+        list_resp = client.get(
+            "/api/submissions/progress",
             headers={"Authorization": f"Bearer {auth_token}"},
         )
-        assert get_resp.json()["progress_id"] is None
+        assert all(item["admission_id"] != admission_id for item in list_resp.json()["items"])
 
-    def test_delete_progress_not_found(self, client, auth_token):
-        """Test deleting when no progress record exists returns 404."""
+    def test_delete_admission_without_progress(self, client, auth_token, admission_id):
+        """Deleting an admission that has no progress record still succeeds."""
         response = client.delete(
-            "/api/submissions/progress/999999",
+            f"/api/submissions/admissions/{admission_id}",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert response.status_code == 200
+        assert response.json()["success"] is True
+        assert client.get(
+            f"/api/submissions/admissions/{admission_id}",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        ).status_code == 404
+
+    def test_delete_admission_not_found(self, client, auth_token):
+        """Deleting an unknown admission id returns 404."""
+        response = client.delete(
+            "/api/submissions/admissions/999999",
             headers={"Authorization": f"Bearer {auth_token}"},
         )
         assert response.status_code == 404
+
+    def test_delete_admission_requires_auth(self, client):
+        """Delete without auth is rejected."""
+        assert client.delete("/api/submissions/admissions/1").status_code == 401
 
     def test_progress_requires_auth(self, client):
         """Test that all progress endpoints require authentication."""
         assert client.get("/api/submissions/progress").status_code == 401
         assert client.get("/api/submissions/progress/1").status_code == 401
         assert client.put("/api/submissions/progress/1", json={}).status_code == 401
-        assert client.delete("/api/submissions/progress/1").status_code == 401

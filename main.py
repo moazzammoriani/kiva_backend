@@ -93,6 +93,59 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class ContactUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    subject: Optional[str] = None
+    phone: Optional[str] = None
+    message: Optional[str] = None
+
+
+class CareerUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    position: Optional[str] = None
+    cover_letter: Optional[str] = None
+
+
+class AdmissionUpdate(BaseModel):
+    session: Optional[str] = None
+    child_name: Optional[str] = None
+    dob: Optional[str] = None
+    address: Optional[str] = None
+    applied_before: Optional[str] = None
+    previous_school: Optional[str] = None
+    previous_class: Optional[str] = None
+    has_report: Optional[str] = None
+    reason: Optional[str] = None
+    medical_info: Optional[str] = None
+    special_needs: Optional[str] = None
+    mother_name: Optional[str] = None
+    mother_profession: Optional[str] = None
+    mother_education: Optional[str] = None
+    mother_organization: Optional[str] = None
+    mother_email: Optional[str] = None
+    mother_phone: Optional[str] = None
+    mother_cnic: Optional[str] = None
+    father_name: Optional[str] = None
+    father_profession: Optional[str] = None
+    father_education: Optional[str] = None
+    father_organization: Optional[str] = None
+    father_email: Optional[str] = None
+    father_phone: Optional[str] = None
+    father_cnic: Optional[str] = None
+    sibling_name: Optional[str] = None
+    sibling_grade: Optional[str] = None
+    sibling_school: Optional[str] = None
+    emergency_name: Optional[str] = None
+    emergency_phone: Optional[str] = None
+    hear_about: Optional[str] = None
+    fit_response: Optional[str] = None
+    declaration: Optional[bool] = None
+    signature: Optional[str] = None
+
+
 class ProgressUpdate(BaseModel):
     child_name: Optional[str] = None
     father_name: Optional[str] = None
@@ -768,6 +821,49 @@ async def get_admission(
     return data
 
 
+@app.put("/api/submissions/admissions/{submission_id}")
+async def update_admission(
+    submission_id: int,
+    body: AdmissionUpdate,
+    username: str = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    row = db.query(AdmissionSubmission).filter(AdmissionSubmission.id == submission_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    for key, value in body.model_dump(exclude_unset=True).items():
+        setattr(row, key, value)
+    db.commit()
+    db.refresh(row)
+    data = row_to_dict(row)
+    if data.get("progress_report_path"):
+        data["progress_report_url"] = f"/api/submissions/admissions/{submission_id}/progress-report"
+        del data["progress_report_path"]
+    else:
+        data["progress_report_url"] = None
+        data.pop("progress_report_path", None)
+    return data
+
+
+@app.delete("/api/submissions/admissions/{submission_id}")
+async def delete_admission(
+    submission_id: int,
+    username: str = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    row = db.query(AdmissionSubmission).filter(AdmissionSubmission.id == submission_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    if row.progress_report_path and os.path.exists(row.progress_report_path):
+        os.remove(row.progress_report_path)
+    progress = db.query(AdmissionProgress).filter(AdmissionProgress.admission_id == submission_id).first()
+    if progress:
+        db.delete(progress)
+    db.delete(row)
+    db.commit()
+    return {"success": True}
+
+
 @app.get("/api/submissions/contacts/{submission_id}")
 async def get_contact(
     submission_id: int,
@@ -778,6 +874,37 @@ async def get_contact(
     if not row:
         raise HTTPException(status_code=404, detail="Submission not found")
     return row_to_dict(row)
+
+
+@app.put("/api/submissions/contacts/{submission_id}")
+async def update_contact(
+    submission_id: int,
+    body: ContactUpdate,
+    username: str = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    row = db.query(ContactSubmission).filter(ContactSubmission.id == submission_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    for key, value in body.model_dump(exclude_unset=True).items():
+        setattr(row, key, value)
+    db.commit()
+    db.refresh(row)
+    return row_to_dict(row)
+
+
+@app.delete("/api/submissions/contacts/{submission_id}")
+async def delete_contact(
+    submission_id: int,
+    username: str = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    row = db.query(ContactSubmission).filter(ContactSubmission.id == submission_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    db.delete(row)
+    db.commit()
+    return {"success": True}
 
 
 @app.get("/api/submissions/careers/{submission_id}", response_model=None)
@@ -797,6 +924,46 @@ async def get_career(
         data["cv_url"] = None
         data.pop("cv_path", None)
     return data
+
+
+@app.put("/api/submissions/careers/{submission_id}", response_model=None)
+async def update_career(
+    submission_id: int,
+    body: CareerUpdate,
+    username: str = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    row = db.query(CareerSubmission).filter(CareerSubmission.id == submission_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    for key, value in body.model_dump(exclude_unset=True).items():
+        setattr(row, key, value)
+    db.commit()
+    db.refresh(row)
+    data = row_to_dict(row)
+    if data.get("cv_path"):
+        data["cv_url"] = f"/api/submissions/careers/{submission_id}/cv"
+        del data["cv_path"]
+    else:
+        data["cv_url"] = None
+        data.pop("cv_path", None)
+    return data
+
+
+@app.delete("/api/submissions/careers/{submission_id}")
+async def delete_career(
+    submission_id: int,
+    username: str = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    row = db.query(CareerSubmission).filter(CareerSubmission.id == submission_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    if row.cv_path and os.path.exists(row.cv_path):
+        os.remove(row.cv_path)
+    db.delete(row)
+    db.commit()
+    return {"success": True}
 
 
 @app.get("/api/submissions/careers/{submission_id}/cv")
@@ -1006,20 +1173,6 @@ async def upsert_progress(
     db.commit()
     db.refresh(row)
     return _admission_progress_row(adm, row)
-
-
-@app.delete("/api/submissions/progress/{admission_id}")
-async def delete_progress(
-    admission_id: int,
-    username: str = Depends(require_auth),
-    db: Session = Depends(get_db),
-):
-    row = db.query(AdmissionProgress).filter(AdmissionProgress.admission_id == admission_id).first()
-    if not row:
-        raise HTTPException(status_code=404, detail="Progress record not found")
-    db.delete(row)
-    db.commit()
-    return {"success": True}
 
 
 # SPA catch-all: serve dashboard/index.html for any /dashboard/* sub-path
