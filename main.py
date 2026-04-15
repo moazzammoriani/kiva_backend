@@ -572,6 +572,89 @@ async def graphql_proxy(request: Request):
 
 # ── Submissions API (read-only, auth required) ──────────────────────────────
 
+def _filter_by_date_range(query, model, date_from: str, date_to: str):
+    if date_from:
+        try:
+            query = query.filter(model.created_at >= datetime.fromisoformat(date_from))
+        except ValueError:
+            pass
+    if date_to:
+        try:
+            end = datetime.fromisoformat(date_to).replace(hour=23, minute=59, second=59)
+            query = query.filter(model.created_at <= end)
+        except ValueError:
+            pass
+    return query
+
+
+def _rows_to_csv(rows, columns: list[str], filename: str) -> Response:
+    import csv
+    import io
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(columns)
+    for row in rows:
+        data = row_to_dict(row)
+        writer.writerow([data.get(c, "") if data.get(c) is not None else "" for c in columns])
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+CONTACT_EXPORT_COLUMNS = ["id", "created_at", "name", "email", "phone", "subject", "message"]
+CAREER_EXPORT_COLUMNS = ["id", "created_at", "name", "email", "phone", "position", "cover_letter", "cv_path"]
+ADMISSION_EXPORT_COLUMNS = [
+    "id", "created_at", "session", "child_name", "dob", "address",
+    "applied_before", "previous_school", "previous_class", "has_report",
+    "progress_report_path", "reason", "medical_info", "special_needs",
+    "mother_name", "mother_profession", "mother_education", "mother_organization",
+    "mother_email", "mother_phone", "mother_cnic",
+    "father_name", "father_profession", "father_education", "father_organization",
+    "father_email", "father_phone", "father_cnic",
+    "sibling_name", "sibling_grade", "sibling_school",
+    "emergency_name", "emergency_phone",
+    "hear_about", "fit_response", "declaration", "signature",
+]
+
+
+@app.get("/api/submissions/contacts/export")
+async def export_contacts_csv(
+    date_from: str = "",
+    date_to: str = "",
+    username: str = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    query = _filter_by_date_range(db.query(ContactSubmission), ContactSubmission, date_from, date_to)
+    rows = query.order_by(ContactSubmission.created_at.desc()).all()
+    return _rows_to_csv(rows, CONTACT_EXPORT_COLUMNS, "contacts-export.csv")
+
+
+@app.get("/api/submissions/careers/export")
+async def export_careers_csv(
+    date_from: str = "",
+    date_to: str = "",
+    username: str = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    query = _filter_by_date_range(db.query(CareerSubmission), CareerSubmission, date_from, date_to)
+    rows = query.order_by(CareerSubmission.created_at.desc()).all()
+    return _rows_to_csv(rows, CAREER_EXPORT_COLUMNS, "careers-export.csv")
+
+
+@app.get("/api/submissions/admissions/export")
+async def export_admissions_csv(
+    date_from: str = "",
+    date_to: str = "",
+    username: str = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    query = _filter_by_date_range(db.query(AdmissionSubmission), AdmissionSubmission, date_from, date_to)
+    rows = query.order_by(AdmissionSubmission.created_at.desc()).all()
+    return _rows_to_csv(rows, ADMISSION_EXPORT_COLUMNS, "admissions-export.csv")
+
+
 @app.get("/api/submissions/contacts")
 async def list_contacts(
     page: int = 1,
