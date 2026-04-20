@@ -95,6 +95,25 @@ class AdmissionSubmission(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
+class KivaKampSubmission(Base):
+    __tablename__ = "kiva_kamp_submissions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    child_class = Column(String, nullable=False)
+    age = Column(String, nullable=False)
+    school_name = Column(String, nullable=False)
+    father_name = Column(String, nullable=False)
+    mother_name = Column(String, nullable=False)
+    father_contact = Column(String, nullable=False)
+    mother_contact = Column(String, nullable=False)
+    attended_past = Column(String, nullable=False)
+    sibling = Column(String, nullable=False)
+    group_registration = Column(String, nullable=False)
+    referral = Column(String, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
 class AdmissionProgress(Base):
     __tablename__ = "admission_progress"
 

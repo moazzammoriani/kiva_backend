@@ -24,7 +24,7 @@ import math
 import httpx
 
 from sqlalchemy import or_
-from database import init_db, get_db, ContactSubmission, CareerSubmission, AdmissionSubmission, AdmissionProgress, AdminUser
+from database import init_db, get_db, ContactSubmission, CareerSubmission, AdmissionSubmission, AdmissionProgress, KivaKampSubmission, AdminUser
 
 UPLOAD_DIR = "uploads"
 KIVA_DIR = Path(__file__).parent.parent / "kiva"
@@ -144,6 +144,21 @@ class AdmissionUpdate(BaseModel):
     fit_response: Optional[str] = None
     declaration: Optional[bool] = None
     signature: Optional[str] = None
+
+
+class KivaKampUpdate(BaseModel):
+    name: Optional[str] = None
+    child_class: Optional[str] = None
+    age: Optional[str] = None
+    school_name: Optional[str] = None
+    father_name: Optional[str] = None
+    mother_name: Optional[str] = None
+    father_contact: Optional[str] = None
+    mother_contact: Optional[str] = None
+    attended_past: Optional[str] = None
+    sibling: Optional[str] = None
+    group_registration: Optional[str] = None
+    referral: Optional[str] = None
 
 
 class ProgressUpdate(BaseModel):
@@ -451,6 +466,51 @@ async def submit_admission(
     return {"success": True, "id": submission.id}
 
 
+@app.post("/api/kiva-kamps")
+async def submit_kiva_kamp(
+    background_tasks: BackgroundTasks,
+    name: str = Form(...),
+    child_class: str = Form(..., alias="class"),
+    age: str = Form(...),
+    schoolName: str = Form(...),
+    fatherName: str = Form(...),
+    motherName: str = Form(...),
+    fatherContact: str = Form(...),
+    motherContact: str = Form(...),
+    attendedPast: str = Form(...),
+    sibling: str = Form(...),
+    group_registration: str = Form(..., alias="group"),
+    referral: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    """Handle Kiva Kamps registration submission."""
+    submission = KivaKampSubmission(
+        name=name,
+        child_class=child_class,
+        age=age,
+        school_name=schoolName,
+        father_name=fatherName,
+        mother_name=motherName,
+        father_contact=fatherContact,
+        mother_contact=motherContact,
+        attended_past=attendedPast,
+        sibling=sibling,
+        group_registration=group_registration,
+        referral=referral,
+    )
+    db.add(submission)
+    db.commit()
+    db.refresh(submission)
+
+    background_tasks.add_task(
+        send_notification_email,
+        f"[Kiva Kamps] Registration — {name}",
+        "kamps", submission.id, f"New Kiva Kamps registration for {name} (class {child_class}, age {age})",
+    )
+
+    return {"success": True, "id": submission.id}
+
+
 _rebuild_lock = asyncio.Lock()
 
 
@@ -670,6 +730,11 @@ ADMISSION_EXPORT_COLUMNS = [
     "emergency_name", "emergency_phone",
     "hear_about", "fit_response", "declaration", "signature",
 ]
+KIVA_KAMP_EXPORT_COLUMNS = [
+    "id", "created_at", "name", "child_class", "age", "school_name",
+    "father_name", "mother_name", "father_contact", "mother_contact",
+    "attended_past", "sibling", "group_registration", "referral",
+]
 
 
 @app.get("/api/submissions/contacts/export")
@@ -706,6 +771,18 @@ async def export_admissions_csv(
     query = _filter_by_date_range(db.query(AdmissionSubmission), AdmissionSubmission, date_from, date_to)
     rows = query.order_by(AdmissionSubmission.created_at.desc()).all()
     return _rows_to_csv(rows, ADMISSION_EXPORT_COLUMNS, "admissions-export.csv")
+
+
+@app.get("/api/submissions/kiva-kamps/export")
+async def export_kiva_kamps_csv(
+    date_from: str = "",
+    date_to: str = "",
+    username: str = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    query = _filter_by_date_range(db.query(KivaKampSubmission), KivaKampSubmission, date_from, date_to)
+    rows = query.order_by(KivaKampSubmission.created_at.desc()).all()
+    return _rows_to_csv(rows, KIVA_KAMP_EXPORT_COLUMNS, "kiva-kamps-export.csv")
 
 
 @app.get("/api/submissions/contacts")
@@ -800,6 +877,77 @@ async def list_admissions(
     summary_keys = {"id", "session", "child_name", "dob", "mother_name", "father_name", "mother_phone", "father_phone", "created_at"}
     result["items"] = [{k: v for k, v in item.items() if k in summary_keys} for item in result["items"]]
     return result
+
+
+@app.get("/api/submissions/kiva-kamps")
+async def list_kiva_kamps(
+    page: int = 1,
+    per_page: int = 25,
+    sort: str = "created_at",
+    order: str = "desc",
+    search: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    username: str = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    search_filter = None
+    if search:
+        pattern = f"%{search}%"
+        search_filter = or_(
+            KivaKampSubmission.name.ilike(pattern),
+            KivaKampSubmission.school_name.ilike(pattern),
+            KivaKampSubmission.father_name.ilike(pattern),
+            KivaKampSubmission.mother_name.ilike(pattern),
+        )
+    return paginated_query(
+        db, KivaKampSubmission, page, per_page, sort, order,
+        {"id", "name", "school_name", "age", "created_at"},
+        search_filter, date_from, date_to,
+    )
+
+
+@app.get("/api/submissions/kiva-kamps/{submission_id}")
+async def get_kiva_kamp(
+    submission_id: int,
+    username: str = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    row = db.query(KivaKampSubmission).filter(KivaKampSubmission.id == submission_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    return row_to_dict(row)
+
+
+@app.put("/api/submissions/kiva-kamps/{submission_id}")
+async def update_kiva_kamp(
+    submission_id: int,
+    body: KivaKampUpdate,
+    username: str = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    row = db.query(KivaKampSubmission).filter(KivaKampSubmission.id == submission_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    for key, value in body.model_dump(exclude_unset=True).items():
+        setattr(row, key, value)
+    db.commit()
+    db.refresh(row)
+    return row_to_dict(row)
+
+
+@app.delete("/api/submissions/kiva-kamps/{submission_id}")
+async def delete_kiva_kamp(
+    submission_id: int,
+    username: str = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    row = db.query(KivaKampSubmission).filter(KivaKampSubmission.id == submission_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    db.delete(row)
+    db.commit()
+    return {"success": True}
 
 
 @app.get("/api/submissions/admissions/{submission_id}")

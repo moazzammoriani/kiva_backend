@@ -253,6 +253,95 @@ class TestAdmissionEndpoint:
         assert response.status_code == 422
 
 
+def _sample_kiva_kamp_payload(name: str = "Sara Ahmed") -> dict:
+    return {
+        "name": name,
+        "class": "Grade 2",
+        "age": "7",
+        "schoolName": "Greenwood Elementary",
+        "fatherName": "Ahmed Khan",
+        "motherName": "Fatima Ahmed",
+        "fatherContact": "03001234567",
+        "motherContact": "03007654321",
+        "attendedPast": "No",
+        "sibling": "Yes",
+        "group": "No",
+        "referral": "Social Media",
+    }
+
+
+class TestKivaKampEndpoint:
+    def test_submit_kiva_kamp_success(self, client):
+        """Test successful Kiva Kamps registration submission."""
+        response = client.post("/api/kiva-kamps", data=_sample_kiva_kamp_payload())
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert "id" in data
+
+    def test_submit_kiva_kamp_missing_required(self, client):
+        """Test Kiva Kamps registration with missing required fields."""
+        response = client.post(
+            "/api/kiva-kamps",
+            data={"name": "Only Name"},
+        )
+        assert response.status_code == 422
+
+    def test_list_kiva_kamps_requires_auth(self, client):
+        """Listing without a token is rejected."""
+        response = client.get("/api/submissions/kiva-kamps")
+        assert response.status_code == 401
+
+    def test_list_and_detail_kiva_kamps(self, client, auth_token):
+        """Submission appears in list and detail view."""
+        submit = client.post("/api/kiva-kamps", data=_sample_kiva_kamp_payload("Listing Check"))
+        assert submit.status_code == 200
+        submission_id = submit.json()["id"]
+
+        headers = {"Authorization": f"Bearer {auth_token}"}
+        list_resp = client.get("/api/submissions/kiva-kamps", headers=headers)
+        assert list_resp.status_code == 200
+        assert list_resp.json()["total"] >= 1
+
+        detail = client.get(f"/api/submissions/kiva-kamps/{submission_id}", headers=headers)
+        assert detail.status_code == 200
+        row = detail.json()
+        assert row["name"] == "Listing Check"
+        assert row["child_class"] == "Grade 2"
+        assert row["group_registration"] == "No"
+
+    def test_export_kiva_kamps_csv(self, client, auth_token):
+        """Export returns CSV with the expected header row."""
+        headers = {"Authorization": f"Bearer {auth_token}"}
+        response = client.get("/api/submissions/kiva-kamps/export", headers=headers)
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/csv")
+        first_line = response.text.splitlines()[0]
+        assert "name" in first_line
+        assert "child_class" in first_line
+        assert "referral" in first_line
+
+    def test_update_and_delete_kiva_kamp(self, client, auth_token):
+        """Admin can update and delete a submission."""
+        submit = client.post("/api/kiva-kamps", data=_sample_kiva_kamp_payload("Delete Me"))
+        submission_id = submit.json()["id"]
+
+        headers = {"Authorization": f"Bearer {auth_token}"}
+        updated = client.put(
+            f"/api/submissions/kiva-kamps/{submission_id}",
+            json={"referral": "Word of Mouth"},
+            headers=headers,
+        )
+        assert updated.status_code == 200
+        assert updated.json()["referral"] == "Word of Mouth"
+
+        deleted = client.delete(f"/api/submissions/kiva-kamps/{submission_id}", headers=headers)
+        assert deleted.status_code == 200
+
+        missing = client.get(f"/api/submissions/kiva-kamps/{submission_id}", headers=headers)
+        assert missing.status_code == 404
+
+
 @pytest.fixture
 def admin_user():
     """Create a test admin user and clean up after."""
