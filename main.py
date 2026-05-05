@@ -660,6 +660,100 @@ async def media_delete(directory: str = "", filename: str = ""):
 TINA_GRAPHQL_URL = os.environ.get("TINA_GRAPHQL_URL", "http://localhost:4001/graphql")
 
 
+# ── Instagram feed proxy ────────────────────────────────────────────────────
+# Instagram Graph API (Instagram Login flow). The token belongs to the
+# Kiva School IG account and is rotated manually every ~60 days. We cache
+# responses for 10 minutes so we don't hammer the API on each page load.
+IG_ACCESS_TOKEN = os.environ.get("KIVA_IG_ACCESS_TOKEN", "")
+IG_GRAPH_BASE = "https://graph.instagram.com/v21.0"
+IG_CACHE_TTL = 600  # seconds
+_ig_cache: dict[int, tuple[float, dict]] = {}
+
+
+@app.get("/api/instagram/media")
+async def instagram_media(limit: int = 9):
+    """Return the IG account's recent posts plus profile metadata for the feed widget."""
+    limit = max(1, min(limit, 25))
+    if not IG_ACCESS_TOKEN:
+        return {"profile": None, "posts": []}
+
+    now = datetime.now(timezone.utc).timestamp()
+    cached = _ig_cache.get(limit)
+    if cached and now - cached[0] < IG_CACHE_TTL:
+        return cached[1]
+
+    media_fields = "id,caption,media_type,media_url,permalink,thumbnail_url,timestamp,children{id}"
+    profile_fields = "id,username,profile_picture_url,media_count"
+    # Over-fetch so we can drop duplicate-caption posts (the account often
+    # publishes the same announcement as both a Reel and a feed post) and
+    # still return `limit` items.
+    fetch_limit = min(limit * 2, 25)
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            profile_resp, media_resp = await asyncio.gather(
+                client.get(
+                    f"{IG_GRAPH_BASE}/me",
+                    params={"fields": profile_fields, "access_token": IG_ACCESS_TOKEN},
+                ),
+                client.get(
+                    f"{IG_GRAPH_BASE}/me/media",
+                    params={"fields": media_fields, "limit": fetch_limit, "access_token": IG_ACCESS_TOKEN},
+                ),
+            )
+    except httpx.HTTPError:
+        logger.exception("Instagram API request failed")
+        return {"profile": None, "posts": []}
+
+    if profile_resp.status_code != 200 or media_resp.status_code != 200:
+        logger.warning(
+            "Instagram API non-200: profile=%s media=%s",
+            profile_resp.status_code, media_resp.status_code,
+        )
+        return {"profile": None, "posts": []}
+
+    profile_raw = profile_resp.json()
+    media_raw = media_resp.json().get("data", [])
+
+    seen_captions: set[str] = set()
+    posts = []
+    for item in media_raw:
+        caption = (item.get("caption") or "").strip()
+        # Use the first 120 chars (case-insensitive, whitespace-collapsed) as
+        # the dedupe key. Empty captions are never deduped.
+        if caption:
+            key = " ".join(caption.split()).lower()[:120]
+            if key in seen_captions:
+                continue
+            seen_captions.add(key)
+
+        media_type = item.get("media_type")
+        thumbnail = item.get("thumbnail_url") if media_type == "VIDEO" else item.get("media_url")
+        children = (item.get("children") or {}).get("data") or []
+        posts.append({
+            "id": item.get("id"),
+            "permalink": item.get("permalink"),
+            "thumbnail": thumbnail,
+            "caption": item.get("caption"),
+            "media_type": media_type,
+            "timestamp": item.get("timestamp"),
+            "children_count": len(children) if media_type == "CAROUSEL_ALBUM" else 0,
+        })
+        if len(posts) >= limit:
+            break
+
+    payload = {
+        "profile": {
+            "username": profile_raw.get("username"),
+            "profile_picture_url": profile_raw.get("profile_picture_url"),
+            "media_count": profile_raw.get("media_count"),
+        },
+        "posts": posts,
+    }
+    _ig_cache[limit] = (now, payload)
+    return payload
+
+
 @app.api_route("/graphql", methods=["GET", "POST"])
 async def graphql_proxy(request: Request):
     """Proxy GraphQL requests to the TinaCMS content API."""
