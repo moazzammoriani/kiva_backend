@@ -24,7 +24,12 @@ import math
 import httpx
 
 from sqlalchemy import or_
+from cnic import normalize_cnic
 from database import init_db, get_db, ContactSubmission, CareerSubmission, AdmissionSubmission, AdmissionProgress, KivaKampSubmission, AdminUser
+
+# Load .env file if present (so `fastapi dev` picks up config without manual sourcing)
+from dotenv import load_dotenv
+load_dotenv()
 
 UPLOAD_DIR = "uploads"
 KIVA_DIR = Path(__file__).parent.parent / "kiva"
@@ -34,10 +39,6 @@ JWT_SECRET = os.environ.get("KIVA_JWT_SECRET")
 if not JWT_SECRET:
     JWT_SECRET = secrets.token_urlsafe(32)
     print("WARNING: KIVA_JWT_SECRET not set — using a random secret (tokens won't survive restarts)")
-
-# Load .env file if present (so `fastapi dev` picks up config without manual sourcing)
-from dotenv import load_dotenv
-load_dotenv()
 
 # Resend config (all optional — if KIVA_NOTIFY_EMAIL is unset, no emails are sent)
 RESEND_API_KEY = os.environ.get("KIVA_RESEND_API_KEY", "")
@@ -435,14 +436,14 @@ async def submit_admission(
         mother_organization=motherOrganization,
         mother_email=motherEmail,
         mother_phone=motherPhone,
-        mother_cnic=motherCnic,
+        mother_cnic=normalize_cnic(motherCnic),
         father_name=fatherName,
         father_profession=fatherProfession,
         father_education=fatherEducation,
         father_organization=fatherOrganization,
         father_email=fatherEmail,
         father_phone=fatherPhone,
-        father_cnic=fatherCnic,
+        father_cnic=normalize_cnic(fatherCnic),
         sibling_name=siblingName,
         sibling_grade=siblingGrade,
         sibling_school=siblingSchool,
@@ -661,13 +662,52 @@ TINA_GRAPHQL_URL = os.environ.get("TINA_GRAPHQL_URL", "http://localhost:4001/gra
 
 
 # ── Instagram feed proxy ────────────────────────────────────────────────────
-# Instagram Graph API (Instagram Login flow). The token belongs to the
-# Kiva School IG account and is rotated manually every ~60 days. We cache
-# responses for 10 minutes so we don't hammer the API on each page load.
+# Instagram Graph API. If KIVA_IG_USER_ID is set, requests use Facebook Graph
+# for a linked professional account. Otherwise they use Instagram Login's
+# /me endpoints. We cache responses for 10 minutes so we don't hammer the API
+# on each page load.
+IG_USERNAME = os.environ.get("KIVA_INSTAGRAM_USERNAME", "kivaschool").strip().lstrip("@") or "kivaschool"
 IG_ACCESS_TOKEN = os.environ.get("KIVA_IG_ACCESS_TOKEN", "")
-IG_GRAPH_BASE = "https://graph.instagram.com/v21.0"
+IG_USER_ID = os.environ.get("KIVA_IG_USER_ID", "").strip()
+IG_GRAPH_VERSION = os.environ.get("KIVA_IG_GRAPH_VERSION", "v21.0").strip() or "v21.0"
+IG_INSTAGRAM_BASE = f"https://graph.instagram.com/{IG_GRAPH_VERSION}"
+IG_FACEBOOK_BASE = f"https://graph.facebook.com/{IG_GRAPH_VERSION}"
 IG_CACHE_TTL = 600  # seconds
 _ig_cache: dict[int, tuple[float, dict]] = {}
+
+
+def _instagram_profile(username: str | None = None, profile_picture_url: str | None = None, media_count: int | None = None) -> dict:
+    return {
+        "username": username or IG_USERNAME,
+        "profile_picture_url": profile_picture_url,
+        "media_count": media_count,
+    }
+
+
+def _instagram_empty_payload(error: str) -> dict:
+    return {"profile": _instagram_profile(), "posts": [], "error": error}
+
+
+def _instagram_urls() -> tuple[str, str]:
+    if IG_USER_ID:
+        base = f"{IG_FACEBOOK_BASE}/{IG_USER_ID}"
+        return base, f"{base}/media"
+    return f"{IG_INSTAGRAM_BASE}/me", f"{IG_INSTAGRAM_BASE}/me/media"
+
+
+def _instagram_error_summary(response: httpx.Response) -> str:
+    try:
+        error = response.json().get("error", {})
+    except ValueError:
+        return response.text[:300]
+
+    message = error.get("message", "unknown error")
+    error_type = error.get("type", "unknown type")
+    code = error.get("code", "unknown code")
+    subcode = error.get("error_subcode")
+    if subcode:
+        return f"{message} ({error_type}, code={code}, subcode={subcode})"
+    return f"{message} ({error_type}, code={code})"
 
 
 @app.get("/api/instagram/media")
@@ -675,13 +715,15 @@ async def instagram_media(limit: int = 9):
     """Return the IG account's recent posts plus profile metadata for the feed widget."""
     limit = max(1, min(limit, 25))
     if not IG_ACCESS_TOKEN:
-        return {"profile": None, "posts": []}
+        logger.warning("Instagram feed token is not configured")
+        return _instagram_empty_payload("missing_token")
 
     now = datetime.now(timezone.utc).timestamp()
     cached = _ig_cache.get(limit)
     if cached and now - cached[0] < IG_CACHE_TTL:
         return cached[1]
 
+    profile_url, media_url = _instagram_urls()
     media_fields = "id,caption,media_type,media_url,permalink,thumbnail_url,timestamp,children{id}"
     profile_fields = "id,username,profile_picture_url,media_count"
     # Over-fetch so we can drop duplicate-caption posts (the account often
@@ -693,24 +735,27 @@ async def instagram_media(limit: int = 9):
         async with httpx.AsyncClient(timeout=10.0) as client:
             profile_resp, media_resp = await asyncio.gather(
                 client.get(
-                    f"{IG_GRAPH_BASE}/me",
+                    profile_url,
                     params={"fields": profile_fields, "access_token": IG_ACCESS_TOKEN},
                 ),
                 client.get(
-                    f"{IG_GRAPH_BASE}/me/media",
+                    media_url,
                     params={"fields": media_fields, "limit": fetch_limit, "access_token": IG_ACCESS_TOKEN},
                 ),
             )
     except httpx.HTTPError:
         logger.exception("Instagram API request failed")
-        return {"profile": None, "posts": []}
+        return _instagram_empty_payload("request_failed")
 
     if profile_resp.status_code != 200 or media_resp.status_code != 200:
         logger.warning(
-            "Instagram API non-200: profile=%s media=%s",
-            profile_resp.status_code, media_resp.status_code,
+            "Instagram API non-200: profile=%s (%s) media=%s (%s)",
+            profile_resp.status_code,
+            _instagram_error_summary(profile_resp),
+            media_resp.status_code,
+            _instagram_error_summary(media_resp),
         )
-        return {"profile": None, "posts": []}
+        return _instagram_empty_payload("api_error")
 
     profile_raw = profile_resp.json()
     media_raw = media_resp.json().get("data", [])
@@ -743,11 +788,11 @@ async def instagram_media(limit: int = 9):
             break
 
     payload = {
-        "profile": {
-            "username": profile_raw.get("username"),
-            "profile_picture_url": profile_raw.get("profile_picture_url"),
-            "media_count": profile_raw.get("media_count"),
-        },
+        "profile": _instagram_profile(
+            username=profile_raw.get("username"),
+            profile_picture_url=profile_raw.get("profile_picture_url"),
+            media_count=profile_raw.get("media_count"),
+        ),
         "posts": posts,
     }
     _ig_cache[limit] = (now, payload)
@@ -1074,6 +1119,8 @@ async def update_admission(
     if not row:
         raise HTTPException(status_code=404, detail="Submission not found")
     for key, value in body.model_dump(exclude_unset=True).items():
+        if key in {"mother_cnic", "father_cnic"}:
+            value = normalize_cnic(value)
         setattr(row, key, value)
     db.commit()
     db.refresh(row)

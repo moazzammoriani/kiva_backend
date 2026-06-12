@@ -11,6 +11,7 @@ import argparse
 import csv
 from datetime import datetime
 
+from cnic import normalize_cnic
 from database import engine, SessionLocal, AdmissionSubmission, Base
 
 # Column indices (verified from CSV header)
@@ -50,7 +51,7 @@ COL = {
     "reason": 37,
     "declaration": 38,
     "signature": 39,
-    "created_at": 60,
+    "created_at": 52,
 }
 
 
@@ -136,14 +137,14 @@ def main():
                     mother_organization=col(row, "mother_organization") or None,
                     mother_email=col(row, "mother_email") or None,
                     mother_phone=col(row, "mother_phone") or None,
-                    mother_cnic=col(row, "mother_cnic") or None,
+                    mother_cnic=normalize_cnic(col(row, "mother_cnic")),
                     father_name=col(row, "father_name") or "Not provided",
                     father_profession=col(row, "father_profession") or None,
                     father_education=col(row, "father_education") or None,
                     father_organization=col(row, "father_organization") or None,
                     father_email=col(row, "father_email") or None,
                     father_phone=col(row, "father_phone") or None,
-                    father_cnic=col(row, "father_cnic") or None,
+                    father_cnic=normalize_cnic(col(row, "father_cnic")),
                     sibling_name=col(row, "sibling_name") or None,
                     sibling_grade=col(row, "sibling_grade") or None,
                     sibling_school=col(row, "sibling_school") or None,

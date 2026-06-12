@@ -1,13 +1,18 @@
 import os
 import io
+import asyncio
 import bcrypt
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+import main
+from cnic import normalize_cnic
 from main import app
 from database import Base, get_db, AdminUser, AdmissionSubmission, AdmissionProgress
+from normalize_cnics import normalize_database
 
 # Use a separate test database
 TEST_DATABASE_URL = "sqlite:///./test_kiva.db"
@@ -37,6 +42,181 @@ def setup_database():
 @pytest.fixture
 def client():
     return TestClient(app)
+
+
+class TestInstagramEndpoint:
+    def test_missing_token_returns_profile_fallback(self, monkeypatch):
+        monkeypatch.setattr(main, "IG_ACCESS_TOKEN", "")
+        monkeypatch.setattr(main, "IG_USERNAME", "kivaschool")
+        main._ig_cache.clear()
+
+        data = asyncio.run(main.instagram_media(limit=3))
+
+        assert data["profile"]["username"] == "kivaschool"
+        assert data["posts"] == []
+        assert data["error"] == "missing_token"
+
+    def test_instagram_api_error_returns_profile_fallback(self, monkeypatch, caplog):
+        class FakeInstagramClient:
+            def __init__(self, timeout):
+                self.timeout = timeout
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+            async def get(self, url, params):
+                return httpx.Response(
+                    400,
+                    json={
+                        "error": {
+                            "message": "API access blocked.",
+                            "type": "OAuthException",
+                            "code": 200,
+                        }
+                    },
+                )
+
+        monkeypatch.setattr(main, "IG_ACCESS_TOKEN", "test-token")
+        monkeypatch.setattr(main, "IG_USERNAME", "kivaschool")
+        monkeypatch.setattr(main.httpx, "AsyncClient", FakeInstagramClient)
+        main._ig_cache.clear()
+        caplog.set_level("WARNING", logger="kiva")
+
+        data = asyncio.run(main.instagram_media(limit=3))
+
+        assert data["profile"]["username"] == "kivaschool"
+        assert data["posts"] == []
+        assert data["error"] == "api_error"
+        assert "API access blocked." in caplog.text
+
+    def test_instagram_success_returns_posts(self, monkeypatch):
+        class FakeInstagramClient:
+            def __init__(self, timeout):
+                self.timeout = timeout
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+            async def get(self, url, params):
+                if url.endswith("/media"):
+                    return httpx.Response(
+                        200,
+                        json={
+                            "data": [
+                                {
+                                    "id": "media-1",
+                                    "caption": "First day of school",
+                                    "media_type": "IMAGE",
+                                    "media_url": "https://cdn.example/post.jpg",
+                                    "permalink": "https://www.instagram.com/p/example/",
+                                    "timestamp": "2026-01-01T00:00:00+0000",
+                                }
+                            ]
+                        },
+                    )
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": "user-1",
+                        "username": "kivaschool",
+                        "profile_picture_url": "https://cdn.example/avatar.jpg",
+                        "media_count": 100,
+                    },
+                )
+
+        monkeypatch.setattr(main, "IG_ACCESS_TOKEN", "test-token")
+        monkeypatch.setattr(main, "IG_USERNAME", "kivaschool")
+        monkeypatch.setattr(main.httpx, "AsyncClient", FakeInstagramClient)
+        main._ig_cache.clear()
+
+        data = asyncio.run(main.instagram_media(limit=3))
+
+        assert data["profile"]["username"] == "kivaschool"
+        assert data["profile"]["media_count"] == 100
+        assert data["posts"] == [
+            {
+                "id": "media-1",
+                "permalink": "https://www.instagram.com/p/example/",
+                "thumbnail": "https://cdn.example/post.jpg",
+                "caption": "First day of school",
+                "media_type": "IMAGE",
+                "timestamp": "2026-01-01T00:00:00+0000",
+                "children_count": 0,
+            }
+        ]
+
+
+class TestCnicNormalization:
+    def test_normalize_cnic(self):
+        assert normalize_cnic("12345-1234567-1") == "1234512345671"
+        assert normalize_cnic(" 12345 / 1234567 / 1 ") == "1234512345671"
+        assert normalize_cnic("") is None
+        assert normalize_cnic(None) is None
+
+    def test_cleanup_script_dry_run_and_apply(self, tmp_path):
+        db_path = tmp_path / "cnic_cleanup.db"
+        cleanup_engine = create_engine(
+            f"sqlite:///{db_path}",
+            connect_args={"check_same_thread": False},
+        )
+        Base.metadata.create_all(bind=cleanup_engine)
+        cleanup_session = sessionmaker(bind=cleanup_engine)()
+        row = AdmissionSubmission(
+            session="2026-2027",
+            child_name="Cleanup Test",
+            dob="2020-01-01",
+            address="Test Address",
+            applied_before="no",
+            special_needs="no",
+            mother_name="Test Mother",
+            mother_cnic="12345-1234567-1",
+            father_name="Test Father",
+            father_cnic="not provided",
+            emergency_name="Test Emergency",
+            emergency_phone="03001234567",
+            declaration=True,
+            signature="Test Parent",
+        )
+        cleanup_session.add(row)
+        cleanup_session.commit()
+        row_id = row.id
+        cleanup_session.close()
+        cleanup_engine.dispose()
+
+        dry_run = normalize_database(db_path)
+        assert dry_run == {
+            "records_scanned": 1,
+            "records_changed": 1,
+            "fields_changed": 2,
+            "would_be_empty": 1,
+            "invalid_length": 0,
+        }
+
+        verify_engine = create_engine(f"sqlite:///{db_path}")
+        verify_session = sessionmaker(bind=verify_engine)()
+        unchanged = verify_session.query(AdmissionSubmission).filter_by(id=row_id).one()
+        assert unchanged.mother_cnic == "12345-1234567-1"
+        assert unchanged.father_cnic == "not provided"
+        verify_session.close()
+        verify_engine.dispose()
+
+        applied = normalize_database(db_path, apply=True)
+        assert applied["records_changed"] == 1
+        assert applied["fields_changed"] == 2
+
+        result_engine = create_engine(f"sqlite:///{db_path}")
+        result_session = sessionmaker(bind=result_engine)()
+        normalized = result_session.query(AdmissionSubmission).filter_by(id=row_id).one()
+        assert normalized.mother_cnic == "1234512345671"
+        assert normalized.father_cnic is None
+        result_session.close()
+        result_engine.dispose()
 
 
 class TestContactEndpoint:
@@ -189,6 +369,11 @@ class TestAdmissionEndpoint:
         data = response.json()
         assert data["success"] is True
         assert "id" in data
+        db = TestSessionLocal()
+        submission = db.query(AdmissionSubmission).filter_by(id=data["id"]).one()
+        assert submission.mother_cnic == "1234512345671"
+        assert submission.father_cnic == "1234512345672"
+        db.close()
 
     def test_submit_admission_minimal(self, client):
         """Test admission form with only required fields."""
@@ -662,13 +847,20 @@ class TestSubmissionsEndpoints:
     def test_update_admission_success(self, client, auth_token, admission_id):
         response = client.put(
             f"/api/submissions/admissions/{admission_id}",
-            json={"child_name": "Renamed Child", "mother_email": "new@example.com"},
+            json={
+                "child_name": "Renamed Child",
+                "mother_email": "new@example.com",
+                "mother_cnic": "12345-1234567-1",
+                "father_cnic": "12345 1234567 2",
+            },
             headers={"Authorization": f"Bearer {auth_token}"},
         )
         assert response.status_code == 200
         data = response.json()
         assert data["child_name"] == "Renamed Child"
         assert data["mother_email"] == "new@example.com"
+        assert data["mother_cnic"] == "1234512345671"
+        assert data["father_cnic"] == "1234512345672"
         get_resp = client.get(
             f"/api/submissions/admissions/{admission_id}",
             headers={"Authorization": f"Bearer {auth_token}"},
