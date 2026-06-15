@@ -25,6 +25,10 @@ import httpx
 
 from sqlalchemy import or_
 from cnic import normalize_cnic
+from eligibility import (
+    calculate_eligible_class,
+    eligibility_year_for_submission,
+)
 from database import init_db, get_db, ContactSubmission, CareerSubmission, AdmissionSubmission, AdmissionProgress, KivaKampSubmission, AdminUser
 
 # Load .env file if present (so `fastapi dev` picks up config without manual sourcing)
@@ -221,6 +225,10 @@ def row_to_dict(row) -> dict:
     for c in row.__table__.columns:
         v = getattr(row, c.name)
         d[c.name] = v.isoformat() if isinstance(v, datetime) else v
+    if isinstance(row, AdmissionSubmission):
+        eligibility_year = eligibility_year_for_submission(row.created_at)
+        d["eligible_class"] = calculate_eligible_class(row.dob, eligibility_year)
+        d["eligibility_year"] = eligibility_year
     return d
 
 
@@ -858,7 +866,8 @@ def _rows_to_csv(rows, columns: list[str], filename: str) -> Response:
 CONTACT_EXPORT_COLUMNS = ["id", "created_at", "name", "email", "phone", "subject", "message"]
 CAREER_EXPORT_COLUMNS = ["id", "created_at", "name", "email", "phone", "position", "cover_letter", "cv_path"]
 ADMISSION_EXPORT_COLUMNS = [
-    "id", "created_at", "session", "child_name", "dob", "address",
+    "id", "created_at", "session", "child_name", "dob", "eligible_class",
+    "eligibility_year", "address",
     "applied_before", "previous_school", "previous_class", "has_report",
     "progress_report_path", "reason", "medical_info", "special_needs",
     "mother_name", "mother_profession", "mother_education", "mother_organization",
@@ -1013,7 +1022,10 @@ async def list_admissions(
         search_filter, date_from, date_to,
     )
     # Return summary fields only for the list view
-    summary_keys = {"id", "session", "child_name", "dob", "mother_name", "father_name", "mother_phone", "father_phone", "created_at"}
+    summary_keys = {
+        "id", "session", "child_name", "dob", "eligible_class", "eligibility_year",
+        "mother_name", "father_name", "mother_phone", "father_phone", "created_at",
+    }
     result["items"] = [{k: v for k, v in item.items() if k in summary_keys} for item in result["items"]]
     return result
 
@@ -1305,6 +1317,11 @@ _ADMISSION_FALLBACKS = {
 }
 
 
+def _eligible_class_for_admission(admission: AdmissionSubmission) -> str | None:
+    eligibility_year = eligibility_year_for_submission(admission.created_at)
+    return calculate_eligible_class(admission.dob, eligibility_year)
+
+
 def _admission_progress_row(adm, prog) -> dict:
     """Build a combined dict from an AdmissionSubmission and optional AdmissionProgress."""
     d = {"admission_id": adm.id}
@@ -1312,14 +1329,18 @@ def _admission_progress_row(adm, prog) -> dict:
         d["progress_id"] = prog.id
         for f in PROGRESS_FIELDS:
             val = getattr(prog, f)
-            if val is None and f in _ADMISSION_FALLBACKS:
+            if val is None and f == "class_name":
+                val = _eligible_class_for_admission(adm)
+            elif val is None and f in _ADMISSION_FALLBACKS:
                 val = getattr(adm, _ADMISSION_FALLBACKS[f])
             d[f] = val
         d["updated_at"] = prog.updated_at.isoformat() if prog.updated_at else None
     else:
         d["progress_id"] = None
         for f in PROGRESS_FIELDS:
-            if f in _ADMISSION_FALLBACKS:
+            if f == "class_name":
+                d[f] = _eligible_class_for_admission(adm)
+            elif f in _ADMISSION_FALLBACKS:
                 d[f] = getattr(adm, _ADMISSION_FALLBACKS[f])
             else:
                 d[f] = None

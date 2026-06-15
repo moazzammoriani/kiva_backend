@@ -1,6 +1,7 @@
 import os
 import io
 import asyncio
+from datetime import datetime
 import bcrypt
 import httpx
 import pytest
@@ -10,8 +11,21 @@ from sqlalchemy.orm import sessionmaker
 
 import main
 from cnic import normalize_cnic
+from eligibility import (
+    OUTSIDE_ELIGIBLE_RANGE,
+    calculate_decimal_age,
+    calculate_eligible_class,
+    current_eligibility_year,
+    eligible_class_for_age,
+)
 from main import app
-from database import Base, get_db, AdminUser, AdmissionSubmission, AdmissionProgress
+from database import (
+    Base,
+    get_db,
+    AdminUser,
+    AdmissionSubmission,
+    AdmissionProgress,
+)
 from normalize_cnics import normalize_database
 
 # Use a separate test database
@@ -219,6 +233,58 @@ class TestCnicNormalization:
         result_engine.dispose()
 
 
+class TestAdmissionEligibility:
+    @pytest.mark.parametrize(
+        ("age", "expected"),
+        [
+            (1.4999, OUTSIDE_ELIGIBLE_RANGE),
+            (1.5, "Play Group"),
+            (2.4999, "Play Group"),
+            (2.5, "Pre-Nursery"),
+            (3.5, "Nursery"),
+            (4.5, "Prep"),
+            (5.5, "I"),
+            (6.5, "II"),
+            (7.5, "III"),
+            (8.5, "IV"),
+            (9.5, "V"),
+            (10.4999, "V"),
+            (10.5, OUTSIDE_ELIGIBLE_RANGE),
+        ],
+    )
+    def test_continuous_decimal_age_ranges(self, age, expected):
+        assert eligible_class_for_age(age) == expected
+
+    def test_decimal_age_uses_july_first_and_average_gregorian_year(self):
+        assert calculate_decimal_age("2021-07-01", 2026) == pytest.approx(5.0, abs=0.01)
+        assert calculate_eligible_class("2021-07-01", 2026) == "Prep"
+        assert calculate_eligible_class("not-a-date", 2026) is None
+
+    def test_admission_response_calculates_class_without_model_columns(self):
+        admission = AdmissionSubmission(
+            dob="2021-07-01",
+            created_at=datetime(2026, 1, 1),
+        )
+
+        data = main.row_to_dict(admission)
+
+        assert data["eligible_class"] == "Prep"
+        assert data["eligibility_year"] == 2026
+        assert "eligible_class" not in AdmissionSubmission.__table__.columns
+        assert "eligibility_year" not in AdmissionSubmission.__table__.columns
+
+    def test_progress_defaults_to_calculated_class(self):
+        admission = AdmissionSubmission(
+            id=123,
+            dob="2021-07-01",
+            created_at=datetime(2026, 1, 1),
+        )
+
+        data = main._admission_progress_row(admission, None)
+
+        assert data["class_name"] == "Prep"
+
+
 class TestContactEndpoint:
     def test_submit_contact_success(self, client):
         """Test successful contact form submission."""
@@ -373,6 +439,8 @@ class TestAdmissionEndpoint:
         submission = db.query(AdmissionSubmission).filter_by(id=data["id"]).one()
         assert submission.mother_cnic == "1234512345671"
         assert submission.father_cnic == "1234512345672"
+        assert not hasattr(submission, "eligible_class")
+        assert not hasattr(submission, "eligibility_year")
         db.close()
 
     def test_submit_admission_minimal(self, client):
@@ -674,6 +742,8 @@ class TestSubmissionsEndpoints:
         item = data["items"][0]
         assert "child_name" in item
         assert "session" in item
+        assert "eligible_class" in item
+        assert "eligibility_year" in item
         assert "address" not in item
         assert "mother_cnic" not in item
 
@@ -849,6 +919,7 @@ class TestSubmissionsEndpoints:
             f"/api/submissions/admissions/{admission_id}",
             json={
                 "child_name": "Renamed Child",
+                "dob": "2020-07-01",
                 "mother_email": "new@example.com",
                 "mother_cnic": "12345-1234567-1",
                 "father_cnic": "12345 1234567 2",
@@ -861,6 +932,9 @@ class TestSubmissionsEndpoints:
         assert data["mother_email"] == "new@example.com"
         assert data["mother_cnic"] == "1234512345671"
         assert data["father_cnic"] == "1234512345672"
+        assert data["eligible_class"] == calculate_eligible_class(
+            "2020-07-01", data["eligibility_year"]
+        )
         get_resp = client.get(
             f"/api/submissions/admissions/{admission_id}",
             headers={"Authorization": f"Bearer {auth_token}"},
@@ -955,7 +1029,9 @@ class TestProgressEndpoints:
         data = response.json()
         assert data["child_name"] == "Progress Test Child"
         assert data["progress_id"] is None
-        assert data["class_name"] is None
+        assert data["class_name"] == calculate_eligible_class(
+            "2019-01-01", current_eligibility_year()
+        )
 
     def test_get_progress_not_found(self, client, auth_token):
         response = client.get(
