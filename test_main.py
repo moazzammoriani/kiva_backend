@@ -25,6 +25,8 @@ from database import (
     AdminUser,
     AdmissionSubmission,
     AdmissionProgress,
+    ContactSubmission,
+    SubmissionView,
 )
 from normalize_cnics import normalize_database
 
@@ -56,6 +58,100 @@ def setup_database():
 @pytest.fixture
 def client():
     return TestClient(app)
+
+
+class TestSubmissionViews:
+    def test_contact_view_status_is_shared_and_preserves_first_view(self):
+        db = TestSessionLocal()
+        try:
+            contact = ContactSubmission(
+                name="View Status Contact",
+                email="view-status@example.com",
+                message="Test",
+            )
+            db.add(contact)
+            db.commit()
+            db.refresh(contact)
+
+            initial = asyncio.run(main.list_contacts(username="admin-one", db=db))
+            item = next(row for row in initial["items"] if row["id"] == contact.id)
+            assert item["viewed"] is False
+            assert item["viewed_at"] is None
+
+            asyncio.run(main.get_contact(contact.id, username="admin-one", db=db))
+            first_viewed_at = db.query(SubmissionView).filter(
+                SubmissionView.submission_type == "contacts",
+                SubmissionView.submission_id == contact.id,
+            ).one().viewed_at
+
+            asyncio.run(main.get_contact(contact.id, username="admin-two", db=db))
+            second_viewed_at = db.query(SubmissionView).filter(
+                SubmissionView.submission_type == "contacts",
+                SubmissionView.submission_id == contact.id,
+            ).one().viewed_at
+            assert second_viewed_at == first_viewed_at
+
+            shared_list = asyncio.run(main.list_contacts(username="admin-two", db=db))
+            shared_item = next(row for row in shared_list["items"] if row["id"] == contact.id)
+            assert shared_item["viewed"] is True
+            assert shared_item["viewed_at"] == first_viewed_at.isoformat()
+
+            asyncio.run(main.delete_contact(contact.id, username="admin-one", db=db))
+            assert db.query(SubmissionView).filter(
+                SubmissionView.submission_type == "contacts",
+                SubmissionView.submission_id == contact.id,
+            ).count() == 0
+        finally:
+            db.close()
+
+    def test_admission_and_progress_view_statuses_are_separate(self):
+        db = TestSessionLocal()
+        try:
+            admission = AdmissionSubmission(
+                session="2026-2027",
+                child_name="Separate View Status",
+                dob="2020-01-01",
+                address="Test Address",
+                applied_before="no",
+                special_needs="no",
+                mother_name="Test Mother",
+                father_name="Test Father",
+                emergency_name="Test Emergency",
+                emergency_phone="03000000000",
+                declaration=True,
+                signature="Test Signature",
+            )
+            db.add(admission)
+            db.commit()
+            db.refresh(admission)
+
+            asyncio.run(main.get_admission(admission.id, username="admin", db=db))
+
+            admissions = asyncio.run(main.list_admissions(username="admin", db=db))
+            admission_item = next(
+                row for row in admissions["items"] if row["id"] == admission.id
+            )
+            progress = asyncio.run(main.list_progress(username="admin", db=db))
+            progress_item = next(
+                row for row in progress["items"] if row["admission_id"] == admission.id
+            )
+            assert admission_item["viewed"] is True
+            assert progress_item["viewed"] is False
+
+            asyncio.run(main.get_progress(admission.id, username="admin", db=db))
+            progress = asyncio.run(main.list_progress(username="admin", db=db))
+            progress_item = next(
+                row for row in progress["items"] if row["admission_id"] == admission.id
+            )
+            assert progress_item["viewed"] is True
+
+            asyncio.run(main.delete_admission(admission.id, username="admin", db=db))
+            assert db.query(SubmissionView).filter(
+                SubmissionView.submission_id == admission.id,
+                SubmissionView.submission_type.in_({"admissions", "progress"}),
+            ).count() == 0
+        finally:
+            db.close()
 
 
 class TestInstagramEndpoint:

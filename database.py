@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean, DateTime, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean, DateTime, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 
 DATABASE_URL = "sqlite:///./kiva.db"
@@ -149,6 +149,23 @@ class AdmissionProgress(Base):
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     admission = relationship("AdmissionSubmission", backref="progress")
+
+
+class SubmissionView(Base):
+    __tablename__ = "submission_views"
+
+    id = Column(Integer, primary_key=True, index=True)
+    submission_type = Column(String, nullable=False)
+    submission_id = Column(Integer, nullable=False)
+    viewed_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "submission_type",
+            "submission_id",
+            name="uq_submission_view_type_id",
+        ),
+    )
 
 
 class AdminUser(Base):

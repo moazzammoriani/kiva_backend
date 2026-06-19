@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from starlette.requests import Request
 from starlette.responses import Response
 from fastapi.responses import FileResponse
@@ -29,7 +30,7 @@ from eligibility import (
     calculate_eligible_class,
     eligibility_year_for_submission,
 )
-from database import init_db, get_db, ContactSubmission, CareerSubmission, AdmissionSubmission, AdmissionProgress, KivaKampSubmission, AdminUser
+from database import init_db, get_db, ContactSubmission, CareerSubmission, AdmissionSubmission, AdmissionProgress, KivaKampSubmission, SubmissionView, AdminUser
 
 # Load .env file if present (so `fastapi dev` picks up config without manual sourcing)
 from dotenv import load_dotenv
@@ -230,6 +231,55 @@ def row_to_dict(row) -> dict:
         d["eligible_class"] = calculate_eligible_class(row.dob, eligibility_year)
         d["eligibility_year"] = eligibility_year
     return d
+
+
+def _add_view_status(
+    db: Session,
+    submission_type: str,
+    items: list[dict],
+    id_key: str = "id",
+) -> None:
+    """Add shared viewed status to serialized submission rows."""
+    submission_ids = [item[id_key] for item in items if item.get(id_key) is not None]
+    if not submission_ids:
+        return
+
+    views = db.query(SubmissionView).filter(
+        SubmissionView.submission_type == submission_type,
+        SubmissionView.submission_id.in_(submission_ids),
+    ).all()
+    viewed_by_id = {view.submission_id: view for view in views}
+
+    for item in items:
+        view = viewed_by_id.get(item.get(id_key))
+        item["viewed"] = view is not None
+        item["viewed_at"] = view.viewed_at.isoformat() if view and view.viewed_at else None
+
+
+def _mark_viewed(db: Session, submission_type: str, submission_id: int) -> None:
+    """Record the first time any admin views a submission."""
+    db.execute(
+        sqlite_insert(SubmissionView)
+        .values(
+            submission_type=submission_type,
+            submission_id=submission_id,
+            viewed_at=datetime.now(timezone.utc),
+        )
+        .on_conflict_do_nothing(
+            index_elements=["submission_type", "submission_id"],
+        )
+    )
+    db.commit()
+
+
+def _delete_views(db: Session, submission_types: str | set[str], submission_id: int) -> None:
+    """Delete view records alongside their submission."""
+    if isinstance(submission_types, str):
+        submission_types = {submission_types}
+    db.query(SubmissionView).filter(
+        SubmissionView.submission_type.in_(submission_types),
+        SubmissionView.submission_id == submission_id,
+    ).delete(synchronize_session=False)
 
 
 def paginated_query(db: Session, model, page: int, per_page: int, sort: str, order: str, allowed_sorts: set, search_filter=None, date_from: str = "", date_to: str = ""):
@@ -953,11 +1003,13 @@ async def list_contacts(
             ContactSubmission.email.ilike(pattern),
             ContactSubmission.subject.ilike(pattern),
         )
-    return paginated_query(
+    result = paginated_query(
         db, ContactSubmission, page, per_page, sort, order,
         {"id", "name", "email", "subject", "created_at"},
         search_filter, date_from, date_to,
     )
+    _add_view_status(db, "contacts", result["items"])
+    return result
 
 
 @app.get("/api/submissions/careers")
@@ -985,6 +1037,7 @@ async def list_careers(
         {"id", "name", "email", "position", "created_at"},
         search_filter, date_from, date_to,
     )
+    _add_view_status(db, "careers", result["items"])
     # Replace cv_path with download URL
     for item in result["items"]:
         if item.get("cv_path"):
@@ -1021,10 +1074,12 @@ async def list_admissions(
         {"id", "child_name", "session", "created_at"},
         search_filter, date_from, date_to,
     )
+    _add_view_status(db, "admissions", result["items"])
     # Return summary fields only for the list view
     summary_keys = {
         "id", "session", "child_name", "dob", "eligible_class", "eligibility_year",
         "mother_name", "father_name", "mother_phone", "father_phone", "created_at",
+        "viewed", "viewed_at",
     }
     result["items"] = [{k: v for k, v in item.items() if k in summary_keys} for item in result["items"]]
     return result
@@ -1051,11 +1106,13 @@ async def list_kiva_kamps(
             KivaKampSubmission.father_name.ilike(pattern),
             KivaKampSubmission.mother_name.ilike(pattern),
         )
-    return paginated_query(
+    result = paginated_query(
         db, KivaKampSubmission, page, per_page, sort, order,
         {"id", "name", "school_name", "age", "created_at"},
         search_filter, date_from, date_to,
     )
+    _add_view_status(db, "kiva-kamps", result["items"])
+    return result
 
 
 @app.get("/api/submissions/kiva-kamps/{submission_id}")
@@ -1067,6 +1124,7 @@ async def get_kiva_kamp(
     row = db.query(KivaKampSubmission).filter(KivaKampSubmission.id == submission_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Submission not found")
+    _mark_viewed(db, "kiva-kamps", submission_id)
     return row_to_dict(row)
 
 
@@ -1096,6 +1154,7 @@ async def delete_kiva_kamp(
     row = db.query(KivaKampSubmission).filter(KivaKampSubmission.id == submission_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Submission not found")
+    _delete_views(db, "kiva-kamps", submission_id)
     db.delete(row)
     db.commit()
     return {"success": True}
@@ -1110,6 +1169,7 @@ async def get_admission(
     row = db.query(AdmissionSubmission).filter(AdmissionSubmission.id == submission_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Submission not found")
+    _mark_viewed(db, "admissions", submission_id)
     data = row_to_dict(row)
     if data.get("progress_report_path"):
         data["progress_report_url"] = f"/api/submissions/admissions/{submission_id}/progress-report"
@@ -1160,6 +1220,7 @@ async def delete_admission(
     progress = db.query(AdmissionProgress).filter(AdmissionProgress.admission_id == submission_id).first()
     if progress:
         db.delete(progress)
+    _delete_views(db, {"admissions", "progress"}, submission_id)
     db.delete(row)
     db.commit()
     return {"success": True}
@@ -1174,6 +1235,7 @@ async def get_contact(
     row = db.query(ContactSubmission).filter(ContactSubmission.id == submission_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Submission not found")
+    _mark_viewed(db, "contacts", submission_id)
     return row_to_dict(row)
 
 
@@ -1203,6 +1265,7 @@ async def delete_contact(
     row = db.query(ContactSubmission).filter(ContactSubmission.id == submission_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Submission not found")
+    _delete_views(db, "contacts", submission_id)
     db.delete(row)
     db.commit()
     return {"success": True}
@@ -1217,6 +1280,7 @@ async def get_career(
     row = db.query(CareerSubmission).filter(CareerSubmission.id == submission_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Submission not found")
+    _mark_viewed(db, "careers", submission_id)
     data = row_to_dict(row)
     if data.get("cv_path"):
         data["cv_url"] = f"/api/submissions/careers/{submission_id}/cv"
@@ -1262,6 +1326,7 @@ async def delete_career(
         raise HTTPException(status_code=404, detail="Submission not found")
     if row.cv_path and os.path.exists(row.cv_path):
         os.remove(row.cv_path)
+    _delete_views(db, "careers", submission_id)
     db.delete(row)
     db.commit()
     return {"success": True}
@@ -1396,8 +1461,11 @@ async def list_progress(
     total = query.count()
     rows = query.order_by(order_clause).offset((page - 1) * per_page).limit(per_page).all()
 
+    items = [_admission_progress_row(adm, prog) for adm, prog in rows]
+    _add_view_status(db, "progress", items, id_key="admission_id")
+
     return {
-        "items": [_admission_progress_row(adm, prog) for adm, prog in rows],
+        "items": items,
         "total": total,
         "page": page,
         "per_page": per_page,
@@ -1460,6 +1528,7 @@ async def get_progress(
     if not adm:
         raise HTTPException(status_code=404, detail="Admission not found")
     prog = db.query(AdmissionProgress).filter(AdmissionProgress.admission_id == admission_id).first()
+    _mark_viewed(db, "progress", admission_id)
     return _admission_progress_row(adm, prog)
 
 
