@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 
@@ -58,6 +58,69 @@ def calculate_decimal_age(dob: str | date | datetime | None, eligibility_year: i
         return None
     cutoff = date(eligibility_year, 7, 1)
     return (cutoff - birth_date).days / 365.2425
+
+
+def calculate_age_parts(
+    dob: str | date | datetime | None,
+    eligibility_year: int,
+) -> tuple[int, int, int] | None:
+    return calculate_age_parts_on_date(dob, date(eligibility_year, 7, 1))
+
+
+def calculate_age_parts_on_date(
+    dob: str | date | datetime | None,
+    as_of: date | datetime,
+) -> tuple[int, int, int] | None:
+    birth_date = parse_dob(dob)
+    if not birth_date:
+        return None
+
+    cutoff = as_of.date() if isinstance(as_of, datetime) else as_of
+    if birth_date > cutoff:
+        return None
+
+    years = cutoff.year - birth_date.year
+    months = cutoff.month - birth_date.month
+    days = cutoff.day - birth_date.day
+
+    if days < 0:
+        previous_month_last_day = cutoff.replace(day=1) - timedelta(days=1)
+        days += previous_month_last_day.day
+        months -= 1
+
+    if months < 0:
+        years -= 1
+        months += 12
+
+    return years, months, days
+
+
+def format_age_parts(parts: tuple[int, int, int] | None) -> str | None:
+    if parts is None:
+        return None
+
+    years, months, days = parts
+
+    def unit(value: int, singular: str) -> str:
+        suffix = "" if value == 1 else "s"
+        return f"{value} {singular}{suffix}"
+
+    return ", ".join((unit(years, "year"), unit(months, "month"), unit(days, "day")))
+
+
+def format_age_on_date(
+    dob: str | date | datetime | None,
+    as_of: date | datetime,
+) -> str | None:
+    return format_age_parts(calculate_age_parts_on_date(dob, as_of))
+
+
+def format_current_age(dob: str | date | datetime | None) -> str | None:
+    return format_age_on_date(dob, datetime.now(PAKISTAN_TIMEZONE).date())
+
+
+def format_age_on_july(dob: str | date | datetime | None, eligibility_year: int) -> str | None:
+    return format_age_parts(calculate_age_parts(dob, eligibility_year))
 
 
 def eligible_class_for_age(age: float) -> str:

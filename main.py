@@ -29,8 +29,11 @@ from cnic import normalize_cnic
 from eligibility import (
     calculate_eligible_class,
     eligibility_year_for_submission,
+    format_current_age,
+    format_age_on_july,
 )
 from database import init_db, get_db, ContactSubmission, CareerSubmission, AdmissionSubmission, AdmissionProgress, KivaKampSubmission, SubmissionView, AdminUser
+from pdf_exports import build_admission_pdf, build_progress_pdf
 
 # Load .env file if present (so `fastapi dev` picks up config without manual sourcing)
 from dotenv import load_dotenv
@@ -229,8 +232,19 @@ def row_to_dict(row) -> dict:
     if isinstance(row, AdmissionSubmission):
         eligibility_year = eligibility_year_for_submission(row.created_at)
         d["eligible_class"] = calculate_eligible_class(row.dob, eligibility_year)
+        d["current_age"] = format_current_age(row.dob)
+        d["age_on_july"] = format_age_on_july(row.dob, eligibility_year)
         d["eligibility_year"] = eligibility_year
     return d
+
+
+def pdf_response(content: bytes, filename: str, inline: bool = False) -> Response:
+    disposition = "inline" if inline else "attachment"
+    return Response(
+        content=content,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'{disposition}; filename="{filename}"'},
+    )
 
 
 def _add_view_status(
@@ -1180,6 +1194,20 @@ async def get_admission(
     return data
 
 
+@app.get("/api/submissions/admissions/{submission_id}/pdf")
+async def download_admission_pdf(
+    submission_id: int,
+    inline: bool = False,
+    username: str = Depends(require_auth_or_query_token),
+    db: Session = Depends(get_db),
+):
+    row = db.query(AdmissionSubmission).filter(AdmissionSubmission.id == submission_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    pdf = build_admission_pdf(row)
+    return pdf_response(pdf, f"admission_{submission_id}.pdf", inline)
+
+
 @app.put("/api/submissions/admissions/{submission_id}")
 async def update_admission(
     submission_id: int,
@@ -1387,9 +1415,22 @@ def _eligible_class_for_admission(admission: AdmissionSubmission) -> str | None:
     return calculate_eligible_class(admission.dob, eligibility_year)
 
 
+def _age_on_july_for_admission(admission: AdmissionSubmission) -> str | None:
+    eligibility_year = eligibility_year_for_submission(admission.created_at)
+    return format_age_on_july(admission.dob, eligibility_year)
+
+
+def _current_age_for_admission(admission: AdmissionSubmission) -> str | None:
+    return format_current_age(admission.dob)
+
+
 def _admission_progress_row(adm, prog) -> dict:
     """Build a combined dict from an AdmissionSubmission and optional AdmissionProgress."""
-    d = {"admission_id": adm.id}
+    d = {
+        "admission_id": adm.id,
+        "current_age": _current_age_for_admission(adm),
+        "age_on_july": _age_on_july_for_admission(adm),
+    }
     if prog:
         d["progress_id"] = prog.id
         for f in PROGRESS_FIELDS:
@@ -1516,6 +1557,22 @@ async def export_progress_csv(
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=progress-export.csv"},
     )
+
+
+@app.get("/api/submissions/progress/{admission_id}/pdf")
+async def download_progress_pdf(
+    admission_id: int,
+    inline: bool = False,
+    username: str = Depends(require_auth_or_query_token),
+    db: Session = Depends(get_db),
+):
+    adm = db.query(AdmissionSubmission).filter(AdmissionSubmission.id == admission_id).first()
+    if not adm:
+        raise HTTPException(status_code=404, detail="Admission not found")
+    prog = db.query(AdmissionProgress).filter(AdmissionProgress.admission_id == admission_id).first()
+    row_data = _admission_progress_row(adm, prog)
+    pdf = build_progress_pdf(adm, row_data)
+    return pdf_response(pdf, f"admission_progress_{admission_id}.pdf", inline)
 
 
 @app.get("/api/submissions/progress/{admission_id}")

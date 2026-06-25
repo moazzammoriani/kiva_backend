@@ -17,6 +17,8 @@ from eligibility import (
     calculate_eligible_class,
     current_eligibility_year,
     eligible_class_for_age,
+    format_age_on_date,
+    format_age_on_july,
 )
 from main import app
 from database import (
@@ -356,6 +358,16 @@ class TestAdmissionEligibility:
         assert calculate_eligible_class("2021-07-01", 2026) == "Prep"
         assert calculate_eligible_class("not-a-date", 2026) is None
 
+    def test_formatted_age_uses_july_first_cutoff(self):
+        assert format_age_on_july("2022-09-08", 2026) == "3 years, 9 months, 23 days"
+        assert format_age_on_july("2021-07-01", 2026) == "5 years, 0 months, 0 days"
+        assert format_age_on_july("not-a-date", 2026) is None
+
+    def test_formatted_age_can_use_current_date(self):
+        assert format_age_on_date("2022-09-08", datetime(2026, 6, 25)) == (
+            "3 years, 9 months, 17 days"
+        )
+
     def test_admission_response_calculates_class_without_model_columns(self):
         admission = AdmissionSubmission(
             dob="2021-07-01",
@@ -365,8 +377,12 @@ class TestAdmissionEligibility:
         data = main.row_to_dict(admission)
 
         assert data["eligible_class"] == "Prep"
+        assert data["current_age"] is not None
+        assert data["age_on_july"] == "5 years, 0 months, 0 days"
         assert data["eligibility_year"] == 2026
         assert "eligible_class" not in AdmissionSubmission.__table__.columns
+        assert "current_age" not in AdmissionSubmission.__table__.columns
+        assert "age_on_july" not in AdmissionSubmission.__table__.columns
         assert "eligibility_year" not in AdmissionSubmission.__table__.columns
 
     def test_progress_defaults_to_calculated_class(self):
@@ -379,6 +395,8 @@ class TestAdmissionEligibility:
         data = main._admission_progress_row(admission, None)
 
         assert data["class_name"] == "Prep"
+        assert data["current_age"] is not None
+        assert data["age_on_july"] == "5 years, 0 months, 0 days"
 
 
 class TestContactEndpoint:
@@ -695,7 +713,9 @@ class TestKivaKampEndpoint:
 def admin_user():
     """Create a test admin user and clean up after."""
     db = TestSessionLocal()
-    password_hash = bcrypt.hashpw(b"testpass123", bcrypt.gensalt()).decode()
+    db.query(AdminUser).filter(AdminUser.username == "testadmin").delete()
+    db.commit()
+    password_hash = bcrypt.hashpw(b"testpass123", bcrypt.gensalt(rounds=4)).decode()
     user = AdminUser(username="testadmin", password_hash=password_hash)
     db.add(user)
     db.commit()
@@ -1063,6 +1083,48 @@ class TestSubmissionsEndpoints:
         # Should get 404 (not found), not 401 (unauthorized)
         assert response.status_code == 404
 
+    def test_admission_pdf_export(self):
+        db = TestSessionLocal()
+        try:
+            row = AdmissionSubmission(
+                session="2025-2026",
+                child_name="PDF Test Child",
+                dob="2022-09-08",
+                address="Test Address",
+                applied_before="no",
+                special_needs="no",
+                mother_name="Test Mother",
+                father_name="Test Father",
+                emergency_name="Test Emergency",
+                emergency_phone="03001234567",
+                declaration=True,
+                signature="Test Parent",
+                created_at=datetime(2026, 1, 1),
+            )
+            db.add(row)
+            db.commit()
+            db.refresh(row)
+
+            response = asyncio.run(
+                main.download_admission_pdf(row.id, username="testadmin", db=db)
+            )
+            inline_response = asyncio.run(
+                main.download_admission_pdf(row.id, inline=True, username="testadmin", db=db)
+            )
+            admission_id = row.id
+        finally:
+            db.close()
+
+        assert response.media_type == "application/pdf"
+        assert response.headers["content-disposition"] == (
+            f'attachment; filename="admission_{admission_id}.pdf"'
+        )
+        assert response.body.startswith(b"%PDF")
+        assert inline_response.headers["content-disposition"] == (
+            f'inline; filename="admission_{admission_id}.pdf"'
+        )
+        assert inline_response.body.startswith(b"%PDF")
+
 
 @pytest.fixture
 def admission_id(client):
@@ -1169,6 +1231,55 @@ class TestProgressEndpoints:
         assert data["class_name"] == "III"
         assert data["acceptance"] == "Accepted"
         assert data["remarks"] == "Great student"
+
+    def test_progress_pdf_export(self):
+        db = TestSessionLocal()
+        try:
+            row = AdmissionSubmission(
+                session="2025-2026",
+                child_name="Progress PDF Test Child",
+                dob="2022-09-08",
+                address="Test Address",
+                applied_before="no",
+                special_needs="no",
+                mother_name="Test Mother",
+                father_name="Test Father",
+                emergency_name="Test Emergency",
+                emergency_phone="03001234567",
+                declaration=True,
+                signature="Test Parent",
+                created_at=datetime(2026, 1, 1),
+            )
+            db.add(row)
+            db.commit()
+            db.refresh(row)
+            progress = AdmissionProgress(
+                admission_id=row.id,
+                class_name="Nursery",
+                remarks="Ready for review",
+            )
+            db.add(progress)
+            db.commit()
+
+            response = asyncio.run(
+                main.download_progress_pdf(row.id, username="testadmin", db=db)
+            )
+            inline_response = asyncio.run(
+                main.download_progress_pdf(row.id, inline=True, username="testadmin", db=db)
+            )
+            admission_id = row.id
+        finally:
+            db.close()
+
+        assert response.media_type == "application/pdf"
+        assert response.headers["content-disposition"] == (
+            f'attachment; filename="admission_progress_{admission_id}.pdf"'
+        )
+        assert response.body.startswith(b"%PDF")
+        assert inline_response.headers["content-disposition"] == (
+            f'inline; filename="admission_progress_{admission_id}.pdf"'
+        )
+        assert inline_response.body.startswith(b"%PDF")
 
     def test_upsert_not_found(self, client, auth_token):
         response = client.put(
