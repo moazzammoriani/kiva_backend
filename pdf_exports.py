@@ -330,6 +330,12 @@ def build_admission_pdf(admission) -> bytes:
                 [("Reason for leaving / changing school", _field(admission, "reason"))],
                 [("Medical Information / Allergies", _field(admission, "medical_info"))],
                 [("Special Educational Needs", _yes_no(_field(admission, "special_needs")))],
+                [
+                    (
+                        "Special Educational Needs Details",
+                        _field(admission, "special_needs_details"),
+                    )
+                ],
             ]
         )
     )
@@ -342,6 +348,7 @@ def build_admission_pdf(admission) -> bytes:
                 [("Occupation", _field(admission, "mother_profession")), ("Occupation", _field(admission, "father_profession"))],
                 [("Organization", _field(admission, "mother_organization")), ("Organization", _field(admission, "father_organization"))],
                 [("Last Degree Obtained", _field(admission, "mother_education")), ("Last Degree Obtained", _field(admission, "father_education"))],
+                [("Institution Attended", _field(admission, "mother_institution")), ("Institution Attended", _field(admission, "father_institution"))],
                 [("Email Address", _field(admission, "mother_email")), ("Email Address", _field(admission, "father_email"))],
                 [("Home / Cell #", _field(admission, "mother_phone")), ("Home / Cell #", _field(admission, "father_phone"))],
                 [("CNIC", _format_cnic(_field(admission, "mother_cnic"))), ("CNIC", _format_cnic(_field(admission, "father_cnic")))],

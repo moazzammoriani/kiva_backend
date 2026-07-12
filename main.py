@@ -130,9 +130,11 @@ class AdmissionUpdate(BaseModel):
     reason: Optional[str] = None
     medical_info: Optional[str] = None
     special_needs: Optional[str] = None
+    special_needs_details: Optional[str] = None
     mother_name: Optional[str] = None
     mother_profession: Optional[str] = None
     mother_education: Optional[str] = None
+    mother_institution: Optional[str] = None
     mother_organization: Optional[str] = None
     mother_email: Optional[str] = None
     mother_phone: Optional[str] = None
@@ -140,6 +142,7 @@ class AdmissionUpdate(BaseModel):
     father_name: Optional[str] = None
     father_profession: Optional[str] = None
     father_education: Optional[str] = None
+    father_institution: Optional[str] = None
     father_organization: Optional[str] = None
     father_email: Optional[str] = None
     father_phone: Optional[str] = None
@@ -447,10 +450,12 @@ async def submit_admission(
     reason: Optional[str] = Form(None),
     medicalInfo: Optional[str] = Form(None),
     specialNeeds: str = Form(...),
+    specialNeedsDetails: Optional[str] = Form(None),
     # Mother's Details
     motherName: str = Form(...),
     motherProfession: Optional[str] = Form(None),
     motherEducation: Optional[str] = Form(None),
+    motherInstitution: Optional[str] = Form(None),
     motherOrganization: Optional[str] = Form(None),
     motherEmail: Optional[str] = Form(None),
     motherPhone: Optional[str] = Form(None),
@@ -459,6 +464,7 @@ async def submit_admission(
     fatherName: str = Form(...),
     fatherProfession: Optional[str] = Form(None),
     fatherEducation: Optional[str] = Form(None),
+    fatherInstitution: Optional[str] = Form(None),
     fatherOrganization: Optional[str] = Form(None),
     fatherEmail: Optional[str] = Form(None),
     fatherPhone: Optional[str] = Form(None),
@@ -482,6 +488,13 @@ async def submit_admission(
     db: Session = Depends(get_db),
 ):
     """Handle admission form submission."""
+    special_needs_details = (specialNeedsDetails or "").strip() or None
+    if specialNeeds.lower() == "yes" and not special_needs_details:
+        raise HTTPException(
+            status_code=400,
+            detail="Special educational needs details are required.",
+        )
+
     progress_report_path = None
     if progressReport and progressReport.filename:
         progress_report_path = await save_upload_file(progressReport)
@@ -502,9 +515,11 @@ async def submit_admission(
         reason=reason,
         medical_info=medicalInfo,
         special_needs=specialNeeds,
+        special_needs_details=special_needs_details,
         mother_name=motherName,
         mother_profession=motherProfession,
         mother_education=motherEducation,
+        mother_institution=motherInstitution,
         mother_organization=motherOrganization,
         mother_email=motherEmail,
         mother_phone=motherPhone,
@@ -512,6 +527,7 @@ async def submit_admission(
         father_name=fatherName,
         father_profession=fatherProfession,
         father_education=fatherEducation,
+        father_institution=fatherInstitution,
         father_organization=fatherOrganization,
         father_email=fatherEmail,
         father_phone=fatherPhone,
@@ -934,9 +950,12 @@ ADMISSION_EXPORT_COLUMNS = [
     "eligibility_year", "address",
     "applied_before", "previous_school", "previous_class", "has_report",
     "progress_report_path", "reason", "medical_info", "special_needs",
-    "mother_name", "mother_profession", "mother_education", "mother_organization",
+    "special_needs_details",
+    "mother_name", "mother_profession", "mother_education",
+    "mother_institution", "mother_organization",
     "mother_email", "mother_phone", "mother_cnic",
-    "father_name", "father_profession", "father_education", "father_organization",
+    "father_name", "father_profession", "father_education",
+    "father_institution", "father_organization",
     "father_email", "father_phone", "father_cnic",
     "sibling_name", "sibling_grade", "sibling_school",
     "emergency_name", "emergency_phone",

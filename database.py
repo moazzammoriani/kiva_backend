@@ -1,5 +1,16 @@
 from datetime import datetime, timezone
-from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy import (
+    create_engine,
+    Column,
+    Integer,
+    String,
+    Text,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 
 DATABASE_URL = "sqlite:///./kiva.db"
@@ -54,11 +65,13 @@ class AdmissionSubmission(Base):
     reason = Column(Text, nullable=True)
     medical_info = Column(Text, nullable=True)
     special_needs = Column(String, nullable=False)
+    special_needs_details = Column(Text, nullable=True)
 
     # Mother's Details
     mother_name = Column(String, nullable=False)
     mother_profession = Column(String, nullable=True)
     mother_education = Column(String, nullable=True)
+    mother_institution = Column(String, nullable=True)
     mother_organization = Column(String, nullable=True)
     mother_email = Column(String, nullable=True)
     mother_phone = Column(String, nullable=True)
@@ -68,6 +81,7 @@ class AdmissionSubmission(Base):
     father_name = Column(String, nullable=False)
     father_profession = Column(String, nullable=True)
     father_education = Column(String, nullable=True)
+    father_institution = Column(String, nullable=True)
     father_organization = Column(String, nullable=True)
     father_email = Column(String, nullable=True)
     father_phone = Column(String, nullable=True)
@@ -175,8 +189,40 @@ class AdminUser(Base):
     password_hash = Column(String, nullable=False)
 
 
+ADMISSION_SUBMISSION_COLUMN_MIGRATIONS = [
+    ("mother_institution", "TEXT"),
+    ("father_institution", "TEXT"),
+    ("special_needs_details", "TEXT"),
+]
+
+
+def _ensure_nullable_columns(bind, table_name: str, columns: list[tuple[str, str]]):
+    with bind.begin() as connection:
+        existing = {
+            row[1]
+            for row in connection.execute(text(f"PRAGMA table_info({table_name})"))
+        }
+        for column_name, column_type in columns:
+            if column_name not in existing:
+                connection.execute(
+                    text(
+                        f"ALTER TABLE {table_name} "
+                        f"ADD COLUMN {column_name} {column_type}"
+                    )
+                )
+
+
+def ensure_admission_submission_columns(bind=engine):
+    _ensure_nullable_columns(
+        bind,
+        "admission_submissions",
+        ADMISSION_SUBMISSION_COLUMN_MIGRATIONS,
+    )
+
+
 def init_db():
     Base.metadata.create_all(bind=engine)
+    ensure_admission_submission_columns(engine)
 
 
 def get_db():

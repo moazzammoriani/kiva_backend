@@ -29,6 +29,7 @@ from database import (
     AdmissionProgress,
     ContactSubmission,
     SubmissionView,
+    ensure_admission_submission_columns,
 )
 from normalize_cnics import normalize_database
 
@@ -53,6 +54,7 @@ app.dependency_overrides[get_db] = override_get_db
 def setup_database():
     """Create tables before tests."""
     Base.metadata.create_all(bind=test_engine)
+    ensure_admission_submission_columns(test_engine)
     os.makedirs("uploads", exist_ok=True)
     yield
 
@@ -512,11 +514,13 @@ class TestAdmissionEndpoint:
                 "hasReport": "yes",
                 "reason": "Looking for better education",
                 "medicalInfo": "No allergies",
-                "specialNeeds": "no",
+                "specialNeeds": "yes",
+                "specialNeedsDetails": "Requires speech therapy support.",
                 # Mother's Details
                 "motherName": "Sarah Wilson",
                 "motherProfession": "Doctor",
                 "motherEducation": "MBBS",
+                "motherInstitution": "Dow University",
                 "motherOrganization": "City Hospital",
                 "motherEmail": "sarah@example.com",
                 "motherPhone": "1111111111",
@@ -525,6 +529,7 @@ class TestAdmissionEndpoint:
                 "fatherName": "David Wilson",
                 "fatherProfession": "Engineer",
                 "fatherEducation": "BSc Engineering",
+                "fatherInstitution": "NED University",
                 "fatherOrganization": "Tech Corp",
                 "fatherEmail": "david@example.com",
                 "fatherPhone": "2222222222",
@@ -553,6 +558,9 @@ class TestAdmissionEndpoint:
         submission = db.query(AdmissionSubmission).filter_by(id=data["id"]).one()
         assert submission.mother_cnic == "1234512345671"
         assert submission.father_cnic == "1234512345672"
+        assert submission.special_needs_details == "Requires speech therapy support."
+        assert submission.mother_institution == "Dow University"
+        assert submission.father_institution == "NED University"
         assert not hasattr(submission, "eligible_class")
         assert not hasattr(submission, "eligibility_year")
         db.close()
@@ -579,6 +587,28 @@ class TestAdmissionEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert data["success"] is True
+
+    def test_submit_admission_requires_special_needs_details_when_yes(self, client):
+        """Test special educational needs details are required when special needs is yes."""
+        response = client.post(
+            "/api/admission",
+            data={
+                "session": "2025-2026",
+                "childName": "No Details",
+                "dob": "2019-03-20",
+                "address": "456 Oak Avenue",
+                "appliedBefore": "no",
+                "specialNeeds": "yes",
+                "motherName": "Emily Brown",
+                "fatherName": "Michael Brown",
+                "emergencyName": "Uncle Brown",
+                "emergencyPhone": "4444444444",
+                "declaration": "true",
+                "signature": "Emily Brown",
+            },
+        )
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Special educational needs details are required."
 
     def test_submit_admission_with_progress_report(self, client):
         """Test admission form with progress report file upload."""

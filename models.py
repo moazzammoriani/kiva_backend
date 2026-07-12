@@ -33,11 +33,13 @@ class AdmissionForm(BaseModel):
     reason: Optional[str] = None
     medicalInfo: Optional[str] = None
     specialNeeds: str
+    specialNeedsDetails: Optional[str] = None
 
     # Mother's Details
     motherName: str
     motherProfession: Optional[str] = None
     motherEducation: Optional[str] = None
+    motherInstitution: Optional[str] = None
     motherOrganization: Optional[str] = None
     motherEmail: Optional[EmailStr] = None
     motherPhone: Optional[str] = None
@@ -47,6 +49,7 @@ class AdmissionForm(BaseModel):
     fatherName: str
     fatherProfession: Optional[str] = None
     fatherEducation: Optional[str] = None
+    fatherInstitution: Optional[str] = None
     fatherOrganization: Optional[str] = None
     fatherEmail: Optional[EmailStr] = None
     fatherPhone: Optional[str] = None
