@@ -349,7 +349,9 @@ class TestAdmissionEligibility:
             (8.5, "IV"),
             (9.5, "V"),
             (10.4999, "V"),
-            (10.5, OUTSIDE_ELIGIBLE_RANGE),
+            (10.5, "VI"),
+            (11.4999, "VI"),
+            (11.5, OUTSIDE_ELIGIBLE_RANGE),
         ],
     )
     def test_continuous_decimal_age_ranges(self, age, expected):
@@ -1094,6 +1096,61 @@ class TestSubmissionsEndpoints:
             headers={"Authorization": f"Bearer {auth_token}"},
         )
         assert response.status_code == 404
+
+    def test_update_admission_requires_details_when_special_needs_changes_to_yes(
+        self, client, auth_token, admission_id
+    ):
+        response = client.put(
+            f"/api/submissions/admissions/{admission_id}",
+            json={"special_needs": "yes", "special_needs_details": "  "},
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == (
+            "Special educational needs details are required."
+        )
+
+    def test_update_admission_accepts_special_needs_details(
+        self, client, auth_token, admission_id
+    ):
+        response = client.put(
+            f"/api/submissions/admissions/{admission_id}",
+            json={
+                "special_needs": "yes",
+                "special_needs_details": "  Requires classroom support.  ",
+            },
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["special_needs_details"] == (
+            "Requires classroom support."
+        )
+
+    def test_update_admission_allows_unrelated_legacy_edit_without_details(
+        self, client, auth_token, admission_id
+    ):
+        db = TestSessionLocal()
+        try:
+            admission = db.query(AdmissionSubmission).filter(
+                AdmissionSubmission.id == admission_id
+            ).first()
+            admission.special_needs = "yes"
+            admission.special_needs_details = None
+            db.commit()
+        finally:
+            db.close()
+
+        response = client.put(
+            f"/api/submissions/admissions/{admission_id}",
+            json={"child_name": "Updated Legacy Admission"},
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["child_name"] == "Updated Legacy Admission"
+        assert response.json()["special_needs_details"] is None
 
     def test_update_admission_requires_auth(self, client):
         assert client.put("/api/submissions/admissions/1", json={}).status_code == 401

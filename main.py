@@ -1237,9 +1237,35 @@ async def update_admission(
     row = db.query(AdmissionSubmission).filter(AdmissionSubmission.id == submission_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Submission not found")
-    for key, value in body.model_dump(exclude_unset=True).items():
+    updates = body.model_dump(exclude_unset=True)
+    special_needs_changed = (
+        "special_needs" in updates
+        and (updates["special_needs"] or "").strip().lower()
+        != (row.special_needs or "").strip().lower()
+    ) or (
+        "special_needs_details" in updates
+        and (updates["special_needs_details"] or "").strip()
+        != (row.special_needs_details or "").strip()
+    )
+    effective_special_needs = updates.get("special_needs", row.special_needs)
+    effective_special_needs_details = updates.get(
+        "special_needs_details", row.special_needs_details
+    )
+    if (
+        special_needs_changed
+        and (effective_special_needs or "").strip().lower() == "yes"
+        and not (effective_special_needs_details or "").strip()
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Special educational needs details are required.",
+        )
+
+    for key, value in updates.items():
         if key in {"mother_cnic", "father_cnic"}:
             value = normalize_cnic(value)
+        elif key == "special_needs_details":
+            value = (value or "").strip() or None
         setattr(row, key, value)
     db.commit()
     db.refresh(row)
