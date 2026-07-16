@@ -11,7 +11,7 @@ from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
-from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Flowable, Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from eligibility import (
     calculate_eligible_class,
@@ -124,8 +124,52 @@ def _label_cell(label: str) -> Paragraph:
     return Paragraph(f"<b>{escape(label)}</b>", STYLES["cell"])
 
 
-def _value_cell(value: Any) -> Paragraph:
+def _value_cell(value: Any) -> Flowable:
+    if isinstance(value, Flowable):
+        return value
     return _p(value, STYLES["body"])
+
+
+class _Checkbox(Flowable):
+    def __init__(self, checked: bool, size: float = 7.5):
+        super().__init__()
+        self.checked = checked
+        self.width = size
+        self.height = size
+
+    def draw(self) -> None:
+        canvas = self.canv
+        canvas.saveState()
+        canvas.setStrokeColor(TEXT)
+        canvas.setLineWidth(0.7)
+        canvas.rect(0, 0, self.width, self.height, stroke=1, fill=0)
+        if self.checked:
+            canvas.setLineWidth(1.15)
+            path = canvas.beginPath()
+            path.moveTo(self.width * 0.18, self.height * 0.48)
+            path.lineTo(self.width * 0.4, self.height * 0.22)
+            path.lineTo(self.width * 0.84, self.height * 0.78)
+            canvas.drawPath(path, stroke=1, fill=0)
+        canvas.restoreState()
+
+
+def _checkbox_statement(checked: bool, text: str) -> Table:
+    statement = Table(
+        [[_Checkbox(checked), _p(text, STYLES["body"])]],
+        colWidths=[10, CONTENT_WIDTH * 0.76],
+    )
+    statement.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                ("TOPPADDING", (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+            ]
+        )
+    )
+    return statement
 
 
 def _yes_no(value: Any) -> str:
@@ -303,7 +347,7 @@ def _field(admission, name: str) -> Any:
 
 
 def build_admission_pdf(admission) -> bytes:
-    eligibility_year, current_age, age_on_july, class_name = _admission_metrics(admission)
+    eligibility_year, current_age, _, class_name = _admission_metrics(admission)
     story: list[Any] = []
 
     _add_header(story, "Admission Application Form")
@@ -323,7 +367,6 @@ def build_admission_pdf(admission) -> bytes:
         _two_col_table(
             [
                 [("Name Of Student", _field(admission, "child_name")), ("Date Of Birth", _format_date(_field(admission, "dob")))],
-                [("Age on July 1", age_on_july), ("Eligible Class", class_name)],
                 [("Home Address", _field(admission, "address"))],
                 [("Have you ever applied before?", _yes_no(_field(admission, "applied_before"))), ("Previous School / Daycare", _field(admission, "previous_school"))],
                 [("Class", _field(admission, "previous_class")), ("Latest Progress Report", _file_label(_field(admission, "progress_report_path")) or _yes_no(_field(admission, "has_report")))],
@@ -406,11 +449,14 @@ def build_admission_pdf(admission) -> bytes:
     )
 
     story.append(_section("Declaration"))
-    declaration_status = "[x]" if _field(admission, "declaration") else "[ ]"
+    declaration_text = _checkbox_statement(
+        bool(_field(admission, "declaration")),
+        "I certify that the information provided in this application is accurate.",
+    )
     story.append(
         _two_col_table(
             [
-                [("Declaration", f"{declaration_status} I certify that the information provided in this application is accurate.")],
+                [("Declaration", declaration_text)],
                 [("Signature", _field(admission, "signature")), ("Eligibility Year", eligibility_year)],
             ]
         )
