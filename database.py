@@ -189,6 +189,13 @@ class AdminUser(Base):
     password_hash = Column(String, nullable=False)
 
 
+class AdmissionSettings(Base):
+    __tablename__ = "admission_settings"
+
+    id = Column(Integer, primary_key=True)
+    accepting_special_needs = Column(Boolean, nullable=False, default=False)
+
+
 ADMISSION_SUBMISSION_COLUMN_MIGRATIONS = [
     ("mother_institution", "TEXT"),
     ("father_institution", "TEXT"),

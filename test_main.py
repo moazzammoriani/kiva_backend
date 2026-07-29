@@ -27,6 +27,7 @@ from database import (
     AdminUser,
     AdmissionSubmission,
     AdmissionProgress,
+    AdmissionSettings,
     ContactSubmission,
     SubmissionView,
     ensure_admission_submission_columns,
@@ -62,6 +63,27 @@ def setup_database():
 @pytest.fixture
 def client():
     return TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def reset_admission_settings():
+    db = TestSessionLocal()
+    db.query(AdmissionSettings).delete()
+    db.commit()
+    db.close()
+    yield
+    db = TestSessionLocal()
+    db.query(AdmissionSettings).delete()
+    db.commit()
+    db.close()
+
+
+@pytest.fixture
+def special_needs_admissions_enabled():
+    db = TestSessionLocal()
+    db.add(AdmissionSettings(id=1, accepting_special_needs=True))
+    db.commit()
+    db.close()
 
 
 class TestSubmissionViews:
@@ -499,7 +521,9 @@ class TestCareerEndpoint:
 
 
 class TestAdmissionEndpoint:
-    def test_submit_admission_success(self, client):
+    def test_submit_admission_success(
+        self, client, special_needs_admissions_enabled
+    ):
         """Test successful admission form submission."""
         response = client.post(
             "/api/admission",
@@ -590,7 +614,9 @@ class TestAdmissionEndpoint:
         data = response.json()
         assert data["success"] is True
 
-    def test_submit_admission_requires_special_needs_details_when_yes(self, client):
+    def test_submit_admission_requires_special_needs_details_when_yes(
+        self, client, special_needs_admissions_enabled
+    ):
         """Test special educational needs details are required when special needs is yes."""
         response = client.post(
             "/api/admission",
@@ -611,6 +637,77 @@ class TestAdmissionEndpoint:
         )
         assert response.status_code == 400
         assert response.json()["detail"] == "Special educational needs details are required."
+
+    def test_submit_admission_rejects_special_needs_before_upload(
+        self, client, monkeypatch
+    ):
+        upload_saved = False
+
+        async def fake_save_upload_file(upload_file):
+            nonlocal upload_saved
+            upload_saved = True
+            return "uploads/should-not-exist.pdf"
+
+        monkeypatch.setattr(main, "save_upload_file", fake_save_upload_file)
+        response = client.post(
+            "/api/admission",
+            data={
+                "session": "2026-2027",
+                "childName": "Suspended Special Needs",
+                "dob": "2019-03-20",
+                "address": "456 Oak Avenue",
+                "appliedBefore": "no",
+                "specialNeeds": "yes",
+                "specialNeedsDetails": "Requires classroom support.",
+                "motherName": "Emily Brown",
+                "fatherName": "Michael Brown",
+                "emergencyName": "Uncle Brown",
+                "emergencyPhone": "03001234567",
+                "declaration": "true",
+                "signature": "Emily Brown",
+            },
+            files={
+                "progressReport": (
+                    "report.pdf",
+                    io.BytesIO(b"Progress report content"),
+                    "application/pdf",
+                ),
+            },
+        )
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == (
+            "Special-needs admissions are currently suspended."
+        )
+        assert upload_saved is False
+        db = TestSessionLocal()
+        assert db.query(AdmissionSubmission).filter_by(
+            child_name="Suspended Special Needs"
+        ).count() == 0
+        db.close()
+
+    def test_submit_non_special_needs_while_setting_is_enabled(
+        self, client, special_needs_admissions_enabled
+    ):
+        response = client.post(
+            "/api/admission",
+            data={
+                "session": "2026-2027",
+                "childName": "No Special Needs Enabled",
+                "dob": "2019-03-20",
+                "address": "456 Oak Avenue",
+                "appliedBefore": "no",
+                "specialNeeds": "no",
+                "motherName": "Emily Brown",
+                "fatherName": "Michael Brown",
+                "emergencyName": "Uncle Brown",
+                "emergencyPhone": "03001234567",
+                "declaration": "true",
+                "signature": "Emily Brown",
+            },
+        )
+
+        assert response.status_code == 200
 
     def test_submit_admission_with_progress_report(self, client):
         """Test admission form with progress report file upload."""
@@ -766,6 +863,47 @@ def auth_token(client, admin_user):
         json={"username": "testadmin", "password": "testpass123"},
     )
     return response.json()["token"]
+
+
+class TestAdmissionSettingsEndpoints:
+    def test_public_settings_default_to_suspended(self, client):
+        response = client.get("/api/admission/settings")
+
+        assert response.status_code == 200
+        assert response.json() == {"accepting_special_needs": False}
+
+    def test_updating_settings_requires_authentication(self, client):
+        response = client.put(
+            "/api/admission/settings",
+            json={"accepting_special_needs": True},
+        )
+
+        assert response.status_code == 401
+
+    def test_authenticated_update_persists_both_states(self, client, auth_token):
+        headers = {"Authorization": f"Bearer {auth_token}"}
+
+        enabled = client.put(
+            "/api/admission/settings",
+            json={"accepting_special_needs": True},
+            headers=headers,
+        )
+        assert enabled.status_code == 200
+        assert enabled.json() == {"accepting_special_needs": True}
+        assert client.get("/api/admission/settings").json() == {
+            "accepting_special_needs": True
+        }
+
+        disabled = client.put(
+            "/api/admission/settings",
+            json={"accepting_special_needs": False},
+            headers=headers,
+        )
+        assert disabled.status_code == 200
+        assert disabled.json() == {"accepting_special_needs": False}
+        assert client.get("/api/admission/settings").json() == {
+            "accepting_special_needs": False
+        }
 
 
 class TestAuthEndpoints:

@@ -32,7 +32,18 @@ from eligibility import (
     format_current_age,
     format_age_on_july,
 )
-from database import init_db, get_db, ContactSubmission, CareerSubmission, AdmissionSubmission, AdmissionProgress, KivaKampSubmission, SubmissionView, AdminUser
+from database import (
+    init_db,
+    get_db,
+    ContactSubmission,
+    CareerSubmission,
+    AdmissionSubmission,
+    AdmissionProgress,
+    KivaKampSubmission,
+    SubmissionView,
+    AdminUser,
+    AdmissionSettings,
+)
 from pdf_exports import build_admission_pdf, build_progress_pdf
 
 # Load .env file if present (so `fastapi dev` picks up config without manual sourcing)
@@ -100,6 +111,10 @@ app.add_middleware(
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+class AdmissionSettingsUpdate(BaseModel):
+    accepting_special_needs: bool
 
 
 class ContactUpdate(BaseModel):
@@ -353,6 +368,38 @@ async def auth_me(username: str = Depends(require_auth)):
     return {"username": username}
 
 
+def _special_needs_admissions_enabled(db: Session) -> bool:
+    settings = db.query(AdmissionSettings).filter(AdmissionSettings.id == 1).first()
+    return bool(settings and settings.accepting_special_needs)
+
+
+@app.get("/api/admission/settings")
+async def get_admission_settings(db: Session = Depends(get_db)):
+    return {
+        "accepting_special_needs": _special_needs_admissions_enabled(db),
+    }
+
+
+@app.put("/api/admission/settings")
+async def update_admission_settings(
+    body: AdmissionSettingsUpdate,
+    username: str = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    settings = db.query(AdmissionSettings).filter(AdmissionSettings.id == 1).first()
+    if settings is None:
+        settings = AdmissionSettings(
+            id=1,
+            accepting_special_needs=body.accepting_special_needs,
+        )
+        db.add(settings)
+    else:
+        settings.accepting_special_needs = body.accepting_special_needs
+    db.commit()
+    db.refresh(settings)
+    return {"accepting_special_needs": settings.accepting_special_needs}
+
+
 async def save_upload_file(upload_file: UploadFile) -> str:
     """Save uploaded file and return the path."""
     ext = os.path.splitext(upload_file.filename)[1] if upload_file.filename else ""
@@ -488,6 +535,12 @@ async def submit_admission(
     db: Session = Depends(get_db),
 ):
     """Handle admission form submission."""
+    if specialNeeds.lower() == "yes" and not _special_needs_admissions_enabled(db):
+        raise HTTPException(
+            status_code=409,
+            detail="Special-needs admissions are currently suspended.",
+        )
+
     special_needs_details = (specialNeedsDetails or "").strip() or None
     if specialNeeds.lower() == "yes" and not special_needs_details:
         raise HTTPException(
